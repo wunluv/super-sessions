@@ -1,0 +1,50 @@
+{
+  "name": "@khanyi/super-sessions",
+  "version": "0.1.0",
+  "description": "Project memory foundation for pi — treats session data as a cultivated asset. Three-tier architecture: mechanical extraction (.md), per-session analysis (cheap model), cross-session synthesis (SOTA model).",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "session",
+    "memory",
+    "analysis",
+    "synthesis",
+    "knowledge-management",
+    "project-insights"
+  ],
+  "author": {
+    "name": "San Naidoo",
+    "email": "san@khanyi.com",
+    "url": "https://khanyi.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wunluv/super-sessions"
+  },
+  "bugs": {
+    "url": "https://github.com/wunluv/super-sessions/issues"
+  },
+  "homepage": "https://github.com/wunluv/super-sessions#readme",
+  "pi": {
+    "extensions": ["./extensions/super-sessions"],
+    "image": "https://raw.githubusercontent.com/wunluv/super-sessions/main/docs/screenshot.png"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

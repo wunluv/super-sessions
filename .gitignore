@@ -1,0 +1,20 @@
+# Dependencies (generated)
+node_modules/
+
+# Pi session data and caches
+.project_insights/
+.search/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
