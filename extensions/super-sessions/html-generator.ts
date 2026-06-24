@@ -540,7 +540,7 @@ function alpineIndexHtml(sessions: SessionMeta[]): string {
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
 </head>
 <body>
-<div class="ic" x-data="{ query: '', sessions: ${cardsJson} }">
+<div class="ic" x-data="indexData">
   <h1>Session Archive</h1>
   <div class="meta">
     Project: ${escHtml(process.cwd())}<br>
@@ -549,8 +549,7 @@ function alpineIndexHtml(sessions: SessionMeta[]): string {
     <span x-show="query"> matching "<span x-text="query"></span>"</span>
   </div>
   <div class="search">
-    <input type="text" x-model="query" placeholder="Search sessions..."
-           @input="document.querySelectorAll('.scard').forEach(el => el.scrollIntoView === undefined ? null : null)">
+    <input type="text" x-model="query" placeholder="Search sessions...">
   </div>
   <div class="slist">
     <template x-for="s in filtered" :key="s.file">
@@ -571,8 +570,8 @@ document.addEventListener('alpine:init', () => {
     query: '',
     sessions: ${cardsJson},
     get filtered() {
-      if (!this.query) return this.sessions;
-      const q = this.query.toLowerCase();
+      const q = this.query.toLowerCase().trim();
+      if (!q) return this.sessions;
       return this.sessions.filter(s =>
         s.name.toLowerCase().includes(q) || s.date.includes(q) || s.id.includes(q)
       );
