@@ -1,7 +1,11 @@
 /**
  * HTML browser generation for session exports.
  * Generates per-session viewer and index.html selector.
- * Uses Alpine.js for reactive interactivity — no vanilla JS DOM manipulation.
+ *
+ * Styling: Tailwind CSS (Play CDN) — no custom CSS.
+ * Interactivity: Alpine.js — no vanilla JS DOM manipulation.
+ * Components: Clean semantic HTML with Tailwind utility classes.
+ *
  * Reads session JSONL directly from filesystem — no SessionManager dependency.
  */
 
@@ -43,15 +47,10 @@ function parseSessionEntries(sessionPath: string): SessionEntry[] {
     const lines = content.split("\n").filter(Boolean);
     const entries: SessionEntry[] = [];
     for (let i = 1; i < lines.length; i++) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        entries.push(entry);
-      } catch { /* skip unparseable */ }
+      try { entries.push(JSON.parse(lines[i])); } catch { /* skip */ }
     }
     return entries;
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 function getActiveBranch(entries: SessionEntry[]): SessionEntry[] {
@@ -77,59 +76,18 @@ function getActiveBranch(entries: SessionEntry[]): SessionEntry[] {
 
 // ─── Serialization ────────────────────────────────────────────────────────────────
 
-function serializeForHtml(entry: SessionEntry): Record<string, unknown> {
-  const msg = entry.message;
-  if (!msg) return { type: entry.type, id: entry.id, parentId: entry.parentId };
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
 
-  const content = msg.content;
-  let blocks: unknown[] = [];
-
-  if (Array.isArray(content)) {
-    blocks = (content as ContentBlock[]).map((block) => {
-      if (block.type === "thinking") {
-        return { type: "thinking", html: escHtml(block.thinking || "") };
-      }
-      if (block.type === "text") {
-        return { type: "text", html: mdToHtml(block.text || "") };
-      }
-      if (block.type === "toolCall") {
-        const args: Record<string, string> = {};
-        if (block.arguments) {
-          for (const [k, v] of Object.entries(block.arguments)) {
-            if (typeof v === "string") args[k] = v;
-            else if (typeof v === "number" || typeof v === "boolean") args[k] = String(v);
-          }
-        }
-        return { type: "toolCall", name: block.name || "tool", id: block.id, args };
-      }
-      return block;
-    });
-  } else if (typeof content === "string") {
-    blocks = [{ type: "text", html: mdToHtml(content) }];
-  }
-
-  // Flatten assistant content: produce separate "display" entries for each block
-  // so Alpine can iterate and show/hide them individually
-  const displayBlocks: Record<string, unknown>[] = [];
-  if (msg.role === "assistant" && Array.isArray(blocks)) {
-    for (const b of blocks as Record<string, unknown>[]) {
-      displayBlocks.push({ ...b, entryId: entry.id || "" });
-    }
-  }
-
-  return {
-    type: "message",
-    id: entry.id,
-    parentId: entry.parentId,
-    timestamp: entry.timestamp || (msg.timestamp ? new Date(msg.timestamp).toISOString() : ""),
-    role: msg.role,
-    displayBlocks,
-    toolCallId: msg.toolCallId,
-    toolName: msg.toolName,
-    isError: msg.isError,
-    // For tool results, extract text
-    resultText: msg.role === "toolResult" ? extractText(msg.content) : "",
-  };
+function mdToHtml(text: string): string {
+  let h = escHtml(text);
+  h = h.replace(/```([\s\S]*?)```/g, "<pre class=\"bg-gray-950 rounded-lg p-3 overflow-x-auto text-xs font-mono leading-relaxed my-2\"><code>$1</code></pre>");
+  h = h.replace(/`([^`]+)`/g, "<code class=\"bg-gray-800 px-1 py-0.5 rounded text-xs font-mono\">$1</code>");
+  h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  h = h.replace(/(https?:\/\/[^\s<]+)/g, "<a href=\"$1\" target=\"_blank\" class=\"text-blue-400 underline\">$1</a>");
+  h = h.replace(/\n/g, "<br>");
+  return h;
 }
 
 function extractText(content: unknown): string {
@@ -141,133 +99,74 @@ function extractText(content: unknown): string {
     .join("\n");
 }
 
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function serializeForHtml(entry: SessionEntry): Record<string, unknown> {
+  const msg = entry.message;
+  if (!msg) return { type: entry.type, id: entry.id, parentId: entry.parentId };
+
+  const content = msg.content;
+  let blocks: unknown[] = [];
+
+  if (Array.isArray(content)) {
+    blocks = (content as ContentBlock[]).map((block) => {
+      if (block.type === "thinking") return { type: "thinking", html: escHtml(block.thinking || "") };
+      if (block.type === "text") return { type: "text", html: mdToHtml(block.text || "") };
+      if (block.type === "toolCall") {
+        const args: Record<string, string> = {};
+        if (block.arguments) {
+          for (const [k, v] of Object.entries(block.arguments)) {
+            if (typeof v === "string") args[k] = v;
+            else if (typeof v === "number" || typeof v === "boolean") args[k] = String(v);
+          }
+        }
+        return { type: "toolCall", name: block.name || "tool", args };
+      }
+      return block;
+    });
+  } else if (typeof content === "string") {
+    blocks = [{ type: "text", html: mdToHtml(content) }];
+  }
+
+  const displayBlocks: Record<string, unknown>[] = [];
+  if (msg.role === "assistant" && Array.isArray(blocks)) {
+    for (const b of blocks as Record<string, unknown>[]) {
+      displayBlocks.push({ ...b, entryId: entry.id || "" });
+    }
+  }
+
+  return {
+    type: "message", id: entry.id, parentId: entry.parentId,
+    timestamp: entry.timestamp || (msg.timestamp ? new Date(msg.timestamp).toISOString() : ""),
+    role: msg.role, displayBlocks,
+    toolName: msg.toolName, isError: msg.isError,
+    resultText: msg.role === "toolResult" ? extractText(msg.content) : "",
+  };
 }
 
-function mdToHtml(text: string): string {
-  let html = escHtml(text);
-  // Code blocks
-  html = html.replace(/```([\s\S]*?)```/g, "<pre><code>$1</code></pre>");
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  // Bold
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  // Links
-  html = html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank">$1</a>');
-  // Line breaks
-  html = html.replace(/\n/g, "<br>");
-  return html;
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, "");
 }
 
-// ─── CSS ──────────────────────────────────────────────────────────────────────────
+// ─── Shared Styles (minimal — Tailwind handles most) ──────────────────────────────
 
-function css(): string {
+function sharedStyles(): string {
   return `
-:root {
-  --bg: #1a1b26; --bg2: #24283b; --bg3: #1f2335;
-  --fg: #c0caf5; --fg2: #9aa5ce; --fg3: #565f89;
-  --accent: #7aa2f7; --accent2: #3d59a1;
-  --green: #9ece6a; --red: #f7768e; --yellow: #e0af68;
-  --border: #3b4261; --radius: 6px;
-  --mono: 'JetBrains Mono','Fira Code',monospace;
-  --sans: -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
-}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--sans);font-size:14px;line-height:1.65;background:var(--bg);color:var(--fg)}
-#app{display:flex;height:100vh;overflow:hidden}
-
-/* Sidebar */
-#sidebar{width:300px;min-width:200px;max-width:50%;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
-.sidebar-hd{padding:14px 12px 10px;border-bottom:1px solid var(--border)}
-.sidebar-hd h2{font-size:15px;font-weight:600;color:var(--accent)}
-.sidebar-meta{font-size:11px;color:var(--fg3);line-height:1.7;margin-top:4px}
-.toggles{padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:16px;flex-wrap:wrap}
-.toggles label{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--fg2);cursor:pointer;user-select:none}
-.toggles input[type=checkbox]{accent-color:var(--accent)}
-
-/* Tree */
-.tree{flex:1;overflow-y:auto;padding:6px 0;font-size:11px;font-family:var(--mono)}
-.tree-entry{padding:3px 12px;cursor:pointer;border-left:3px solid transparent;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .1s}
-.tree-entry:hover{background:var(--bg3)}
-.tree-entry.active{background:var(--accent2);border-left-color:var(--accent)}
-.tree-entry .pfx{color:var(--fg3);margin-right:4px}
-.tree-entry.thk{color:var(--fg3);font-style:italic}
-.tree-entry.tool{color:var(--yellow)}
-.tree-entry.result{color:var(--fg2)}
-.tree-entry.result.err{color:var(--red)}
-
-/* Resizer */
-#resizer{width:4px;cursor:col-resize;background:transparent;transition:background .15s;flex-shrink:0}
-#resizer:hover,#resizer.drag{background:var(--accent)}
-
-/* Content */
-#content{flex:1;overflow-y:auto;padding:24px 32px}
-.msg{margin-bottom:16px;padding:12px 16px;border-radius:var(--radius);background:var(--bg2)}
-.msg.user{border-left:3px solid var(--accent);margin-right:48px}
-.msg.assistant{border-left:3px solid var(--green);margin-left:24px;margin-right:24px}
-.msg.toolResult{border-left:3px solid var(--fg3)}
-.msg.toolResult.error{border-left-color:var(--red)}
-.msg .lbl{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
-.msg.user .lbl{color:var(--accent)}
-.msg.assistant .lbl{color:var(--green)}
-.msg.toolResult .lbl{color:var(--fg2)}
-.msg .ts{font-size:10px;color:var(--fg3);margin-left:8px;font-weight:400}
-.msg .body{font-size:14px;line-height:1.75}
-.msg .body p{margin-bottom:8px}
-.msg .body p:last-child{margin-bottom:0}
-.msg .body pre{background:var(--bg);padding:10px 12px;border-radius:var(--radius);overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.5;margin:8px 0}
-.msg .body code{font-family:var(--mono);font-size:13px;background:var(--bg);padding:1px 4px;border-radius:3px}
-.msg .body pre code{background:none;padding:0}
-.msg .body a{color:var(--accent)}
-
-/* Thinking & Tool blocks */
-.thk-block{margin:8px 0;padding:10px 14px;background:var(--bg3);border-radius:var(--radius);font-style:italic;color:var(--fg2);font-size:13px;border-left:2px solid var(--fg3)}
-.tblock{margin:8px 0;padding:10px 14px;background:var(--bg);border-radius:var(--radius);border:1px solid var(--border);font-size:13px}
-.tblock .thd{font-family:var(--mono);font-size:12px;font-weight:600;margin-bottom:6px;color:var(--yellow)}
-.tblock .targs{font-family:var(--mono);font-size:12px;color:var(--fg2);margin-left:16px;line-height:1.6}
-.tblock .tout{font-family:var(--mono);font-size:12px;color:var(--fg2);white-space:pre-wrap;max-height:300px;overflow-y:auto;margin-top:6px;padding:8px;background:var(--bg2);border-radius:4px;line-height:1.5}
-.msg.toolResult .tout{font-family:var(--mono);font-size:12px;color:var(--fg2);white-space:pre-wrap;max-height:400px;overflow-y:auto;padding:8px;background:var(--bg);border-radius:4px;line-height:1.5}
-
-/* Back link */
-.back{display:inline-block;margin-bottom:16px;color:var(--accent);text-decoration:none;font-size:13px}
-.back:hover{text-decoration:underline}
-
-/* Scrollbar */
-::-webkit-scrollbar{width:6px}
-::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--fg3)}
-
-/* Index page */
-.ic{max-width:900px;margin:40px auto;padding:0 20px}
-.ic h1{font-size:24px;margin-bottom:8px;color:var(--accent)}
-.ic .meta{color:var(--fg3);font-size:13px;margin-bottom:20px;line-height:1.7}
-.ic .search{margin-bottom:20px}
-.ic .search input{width:100%;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);color:var(--fg);font-size:14px;outline:none;font-family:var(--sans)}
-.ic .search input:focus{border-color:var(--accent)}
-.ic .search input::placeholder{color:var(--fg3)}
-.slist{display:flex;flex-direction:column;gap:12px}
-.scard{background:var(--bg2);border-radius:var(--radius);padding:16px 20px;border-left:3px solid var(--accent2);transition:border-color .15s,background .15s;cursor:pointer;text-decoration:none;color:inherit;display:block}
-.scard:hover{border-left-color:var(--accent);background:var(--bg3)}
-.scard .sd{font-size:12px;color:var(--fg3);font-family:var(--mono)}
-.scard .sn{font-size:15px;font-weight:600;margin:4px 0}
-.scard .ss{font-size:12px;color:var(--fg2);margin-top:4px}
+/* Resizer drag handle */
+#resizer.dragging { cursor: col-resize; }
+/* Smooth scroll */
+html { scroll-behavior: smooth; }
+/* Alpine cloak */
+[x-cloak] { display: none !important; }
 `;
 }
 
-// ─── Alpine.js Session Viewer ─────────────────────────────────────────────────────
+// ─── Session Viewer HTML ──────────────────────────────────────────────────────────
 
-function alpineSessionHtml(
+function sessionViewerHtml(
   sessionName: string,
   metadata: Record<string, unknown>,
   entriesJson: string,
 ): string {
-  // Build tree items: each message entry becomes a tree node.
-  // For assistant entries with displayBlocks, also create sub-nodes.
   const entries = JSON.parse(entriesJson).entries as Record<string, unknown>[];
-
-  // Pre-build tree nodes for the sidebar
   const treeNodes: Record<string, unknown>[] = [];
   const seenIds = new Set<string>();
 
@@ -275,12 +174,12 @@ function alpineSessionHtml(
     if (entry.type !== "message") continue;
     const eid = String(entry.id || "");
     const role = String(entry.role || "");
+    const depth = Number(entry._depth || 0);
 
     let prefix = "", cssClass = "";
-    if (role === "user") { prefix = "👤"; }
+    if (role === "user") prefix = "👤";
     else if (role === "assistant") {
       prefix = "🤖";
-      // Add thinking/tool sub-nodes
       const blocks = entry.displayBlocks as Record<string, unknown>[] | undefined;
       if (blocks) {
         for (const b of blocks) {
@@ -288,54 +187,42 @@ function alpineSessionHtml(
             const kid = `${eid}_think`;
             if (!seenIds.has(kid)) {
               seenIds.add(kid);
-              treeNodes.push({ id: kid, label: "thinking", prefix: "💭", cssClass: "thk", depth: (entry._depth || 0) + 2, parentId: eid });
+              treeNodes.push({ id: kid, label: "thinking", prefix: "💭", kind: "think", depth: depth + 2, parentId: eid });
             }
           } else if (b.type === "toolCall") {
             const kid = `${eid}_tool_${b.name || "tool"}`;
             if (!seenIds.has(kid)) {
               seenIds.add(kid);
-              treeNodes.push({ id: kid, label: String(b.name || "tool"), prefix: "🔧", cssClass: "tool", depth: (entry._depth || 0) + 2, parentId: eid });
+              treeNodes.push({ id: kid, label: String(b.name || "tool"), prefix: "🔧", kind: "tool", depth: depth + 2, parentId: eid });
             }
           }
         }
       }
-    }
-    else if (role === "toolResult") {
+    } else if (role === "toolResult") {
       prefix = "📋";
-      cssClass = entry.isError ? "result err" : "result";
+      cssClass = entry.isError ? "text-red-400" : "text-gray-400";
     }
 
     if (!seenIds.has(eid)) {
       seenIds.add(eid);
-      // Extract label from first text block
       let label = "";
       const blocks = entry.displayBlocks as Record<string, unknown>[] | undefined;
       if (blocks) {
         for (const b of blocks) {
-          if (b.type === "text" && b.html) {
-            label = stripHtml(String(b.html)).slice(0, 50);
-            break;
-          }
+          if (b.type === "text" && b.html) { label = stripHtml(String(b.html)).slice(0, 50); break; }
         }
       }
       if (!label && role === "toolResult") label = String(entry.toolName || "result");
 
-      treeNodes.push({
-        id: eid,
-        label,
-        prefix,
-        cssClass,
-        depth: entry._depth || 0,
-        parentId: entry.parentId || null,
-      });
+      treeNodes.push({ id: eid, label, prefix, kind: role, cssClass, depth, parentId: entry.parentId || null });
     }
   }
 
-  // Determine depth from parentId chain
+  // Recalculate depth from parent chain
   const byId = new Map(treeNodes.map(n => [n.id, n]));
   for (const node of treeNodes) {
-    if (!node.depth || node.depth === 0) {
-      let d = 0;
+    let d = Number(node.depth || 0);
+    if (d === 0) {
       let cur = node.parentId ? byId.get(node.parentId as string) : null;
       while (cur) { d++; cur = cur.parentId ? byId.get(cur.parentId as string) : null; }
       node.depth = d;
@@ -345,102 +232,158 @@ function alpineSessionHtml(
   const treeJson = JSON.stringify(treeNodes);
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>${escHtml(sessionName)} — super_sessions</title>
-<style>${css()}</style>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class'}</script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+<style>${sharedStyles()}</style>
 </head>
-<body>
-<div id="app" x-data="sessionViewer()" x-init="init($el)">
-  <!-- Sidebar -->
-  <aside id="sidebar">
-    <div class="sidebar-hd">
-      <h2>${escHtml(sessionName)}</h2>
-      <div class="sidebar-meta">
-        Date: ${escHtml(String(metadata.date || ""))}<br>
-        Messages: ${metadata.messageCount || 0}
+<body class="bg-gray-950 text-gray-100 font-sans antialiased">
+<div id="app" x-data="sessionViewer" x-init="init($el)" x-cloak class="flex h-screen overflow-hidden">
+
+  <!-- === SIDEBAR === -->
+  <aside id="sidebar"
+    class="w-80 min-w-[200px] max-w-[50%] bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
+    <!-- Header -->
+    <div class="p-4 border-b border-gray-800">
+      <h2 class="text-sm font-semibold text-blue-400 truncate">${escHtml(sessionName)}</h2>
+      <div class="text-[11px] text-gray-500 mt-1 space-y-0.5">
+        <div>${escHtml(String(metadata.date || ""))}</div>
+        <div>${metadata.messageCount || 0} messages</div>
       </div>
     </div>
-    <div class="toggles">
-      <label><input type="checkbox" x-model="showThinking"> Show thinking</label>
-      <label><input type="checkbox" x-model="showTools"> Show tools</label>
+
+    <!-- Toggles -->
+    <div class="px-4 py-2.5 border-b border-gray-800 flex gap-4">
+      <label class="flex items-center gap-1.5 text-[11px] text-gray-400 cursor-pointer select-none">
+        <input type="checkbox" x-model="showThinking"
+               class="w-3.5 h-3.5 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500/30">
+        <span>Thinking</span>
+      </label>
+      <label class="flex items-center gap-1.5 text-[11px] text-gray-400 cursor-pointer select-none">
+        <input type="checkbox" x-model="showTools"
+               class="w-3.5 h-3.5 rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500/30">
+        <span>Tools</span>
+      </label>
     </div>
-    <div class="tree">
+
+    <!-- Tree -->
+    <div class="flex-1 overflow-y-auto py-1 font-mono text-[11px]">
       <template x-for="node in filteredTree" :key="node.id">
-        <div class="tree-entry"
-             :class="[node.cssClass || '', activeId === node.id ? 'active' : '']"
+        <div @click="scrollTo(node.id)"
+             :class="{
+               'bg-blue-500/20 border-l-blue-400': activeId === node.id,
+               'border-l-transparent hover:bg-gray-800/50': activeId !== node.id,
+               'italic text-gray-500': node.kind === 'think',
+               'text-amber-400': node.kind === 'tool',
+               'text-gray-400': node.kind === 'toolResult',
+               'text-gray-100': node.kind === 'user' || node.kind === 'assistant'
+             }"
              :style="'padding-left:' + (node.depth * 14 + 12) + 'px'"
-             @click="scrollTo(node.id)">
-          <span class="pfx" x-text="node.prefix"></span>
-          <span x-text="node.label"></span>
+             class="py-[3px] pr-3 border-l-[3px] cursor-pointer truncate transition-colors">
+          <span class="mr-1 text-gray-500" x-text="node.prefix"></span>
+          <span x-text="node.label || '…'"></span>
         </div>
       </template>
     </div>
   </aside>
 
-  <!-- Resizer -->
+  <!-- === RESIZER === -->
   <div id="resizer"
        @mousedown="resizeStart"
-       :class="{ drag: resizing }"></div>
+       :class="{ 'dragging bg-blue-500': resizing }"
+       class="w-1 cursor-col-resize bg-transparent hover:bg-blue-500/50 transition-colors shrink-0"></div>
 
-  <!-- Content -->
-  <main id="content">
-    <a href="index.html" class="back">← All sessions</a>
-    <div id="messages">
-      <template x-for="entry in entries" :key="entry.id">
-        <div class="msg" :class="msgClass(entry)" :id="'msg-' + entry.id">
-          <div class="lbl">
-            <span x-text="roleLabel(entry)"></span>
-            <span class="ts" x-text="entry.timestamp"></span>
-          </div>
+  <!-- === CONTENT === -->
+  <main class="flex-1 overflow-y-auto">
+    <div class="max-w-3xl mx-auto px-6 py-6">
+      <a href="index.html" class="inline-block text-xs text-gray-500 hover:text-blue-400 mb-6 transition-colors">← All sessions</a>
 
-          <!-- Assistant: iterate display blocks -->
-          <template x-if="entry.role === 'assistant'">
-            <div class="body">
-              <template x-for="b in entry.displayBlocks" :key="b.entryId + b.type">
-                <div>
-                  <div x-show="b.type === 'text'" x-html="b.html"></div>
-                  <div x-show="b.type === 'thinking' && showThinking"
-                       class="thk-block" :id="entry.id + '_think'">
-                    <strong>💭 Thinking:</strong><br>
-                    <span x-html="b.html"></span>
-                  </div>
-                  <div x-show="b.type === 'toolCall' && showTools"
-                       class="tblock" :id="entry.id + '_tool_' + (b.name || 'tool')">
-                    <div class="thd">🔧 <span x-text="b.name"></span></div>
-                    <div class="targs">
-                      <template x-for="(v, k) in b.args" :key="k">
-                        <div><span x-text="k + ': ' + v"></span></div>
-                      </template>
+      <div class="space-y-4">
+        <template x-for="entry in entries" :key="entry.id">
+          <div :id="'msg-' + entry.id">
+
+            <!-- User message -->
+            <div x-show="entry.role === 'user'"
+                 class="border-l-4 border-blue-500 pl-4 py-3">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-[10px] font-semibold uppercase tracking-wider text-blue-400">User</span>
+                <span class="text-[10px] text-gray-600" x-text="entry.timestamp"></span>
+              </div>
+              <div class="text-sm leading-relaxed text-gray-200"
+                   x-html="entry.displayBlocks?.[0]?.html || ''"></div>
+            </div>
+
+            <!-- Assistant message -->
+            <div x-show="entry.role === 'assistant'"
+                 class="border-l-4 border-emerald-500 pl-4 py-3 ml-6">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-[10px] font-semibold uppercase tracking-wider text-emerald-400">Assistant</span>
+                <span class="text-[10px] text-gray-600" x-text="entry.timestamp"></span>
+              </div>
+              <div class="space-y-2">
+                <template x-for="b in entry.displayBlocks" :key="b.entryId + b.type">
+                  <div>
+                    <!-- Text -->
+                    <div x-show="b.type === 'text'"
+                         class="text-sm leading-relaxed text-gray-200"
+                         x-html="b.html"></div>
+                    <!-- Thinking -->
+                    <div x-show="b.type === 'thinking' && showThinking"
+                         :id="entry.id + '_think'"
+                         class="bg-gray-900 border-l-2 border-gray-600 pl-3 py-2 rounded-r text-[13px] text-gray-400 italic">
+                      <div class="text-[10px] font-semibold text-gray-500 mb-1">💭 Thinking</div>
+                      <span x-html="b.html"></span>
+                    </div>
+                    <!-- Tool call -->
+                    <div x-show="b.type === 'toolCall' && showTools"
+                         :id="entry.id + '_tool_' + (b.name || 'tool')"
+                         class="bg-gray-900 border border-gray-800 rounded-lg p-3 text-xs">
+                      <div class="font-mono font-semibold text-amber-400 mb-1.5">🔧 <span x-text="b.name"></span></div>
+                      <div class="font-mono text-gray-400 ml-3 space-y-0.5">
+                        <template x-for="(v, k) in b.args" :key="k">
+                          <div><span x-text="k + ': ' + v"></span></div>
+                        </template>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </template>
+                </template>
+              </div>
             </div>
-          </template>
 
-          <!-- User: simple text -->
-          <template x-if="entry.role === 'user'">
-            <div class="body" x-html="entry.displayBlocks?.[0]?.html || ''"></div>
-          </template>
-
-          <!-- Tool result -->
-          <template x-if="entry.role === 'toolResult'">
-            <div>
-              <div class="tout" x-show="showTools" x-text="entry.resultText"></div>
+            <!-- Tool result -->
+            <div x-show="entry.role === 'toolResult' && showTools"
+                 class="border-l-4 pl-4 py-3 ml-12"
+                 :class="entry.isError ? 'border-red-500' : 'border-gray-600'">
+              <div class="flex items-center gap-2 mb-2">
+                <span class="text-[10px] font-semibold uppercase tracking-wider"
+                      :class="entry.isError ? 'text-red-400' : 'text-gray-400'">
+                  📋 <span x-text="entry.toolName || 'result'"></span>
+                </span>
+                <span class="text-[10px] text-gray-600" x-text="entry.timestamp"></span>
+              </div>
+              <pre class="text-xs text-gray-400 font-mono leading-relaxed whitespace-pre-wrap max-h-96 overflow-y-auto bg-gray-900 rounded-lg p-3"
+                   x-text="entry.resultText"></pre>
             </div>
-          </template>
-        </div>
-      </template>
+
+          </div>
+        </template>
+      </div>
+
+      <!-- Empty state -->
+      <div x-show="entries.length === 0" class="text-center text-gray-600 py-20">
+        No messages in this session.
+      </div>
     </div>
   </main>
 </div>
+
 <script id="session-data" type="application/json">${entriesJson}</script>
 <script>
-// Register Alpine component
 document.addEventListener('alpine:init', () => {
   Alpine.data('sessionViewer', () => ({
     entries: [],
@@ -452,8 +395,8 @@ document.addEventListener('alpine:init', () => {
 
     get filteredTree() {
       return this.treeNodes.filter(n => {
-        if (n.cssClass === 'thk' && !this.showThinking) return false;
-        if ((n.cssClass === 'tool' || n.cssClass === 'result' || n.cssClass === 'result err') && !this.showTools) return false;
+        if (n.kind === 'think' && !this.showThinking) return false;
+        if ((n.kind === 'tool' || n.kind === 'toolResult') && !this.showTools) return false;
         return true;
       });
     },
@@ -468,38 +411,29 @@ document.addEventListener('alpine:init', () => {
 
     scrollTo(id) {
       this.activeId = id;
-      const el = document.getElementById('msg-' + id.split('_')[0]);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    },
-
-    msgClass(entry) {
-      if (entry.role === 'toolResult') return 'toolResult' + (entry.isError ? ' error' : '');
-      return entry.role || '';
-    },
-
-    roleLabel(entry) {
-      if (entry.role === 'toolResult') return '📋 ' + (entry.toolName || 'result');
-      if (entry.role === 'user') return 'User';
-      if (entry.role === 'assistant') return 'Assistant';
-      return entry.role || '';
+      const baseId = id.split('_')[0];
+      const el = document.getElementById('msg-' + baseId);
+      if (el) {
+        // Find the specific child if it's a sub-node
+        const subEl = document.getElementById(id);
+        if (subEl && subEl !== el) subEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        else el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     },
 
     resizeStart(e) {
       this.resizing = true;
-      const sidebar = document.getElementById('sidebar');
-      const sx = e.clientX;
-      const sw = sidebar.offsetWidth;
-      const onMove = (ev) => {
-        sidebar.style.width = Math.max(200, Math.min(sw + ev.clientX - sx, innerWidth * 0.5)) + 'px';
-      };
-      const onUp = () => {
+      const bar = document.getElementById('sidebar');
+      const sx = e.clientX, sw = bar.offsetWidth;
+      const mv = (ev) => bar.style.width = Math.max(200, Math.min(sw + ev.clientX - sx, innerWidth * 0.5)) + 'px';
+      const up = () => {
         this.resizing = false;
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('mousemove', mv);
+        document.removeEventListener('mouseup', up);
         document.body.style.userSelect = '';
       };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      document.addEventListener('mousemove', mv);
+      document.addEventListener('mouseup', up);
       document.body.style.userSelect = 'none';
     }
   }));
@@ -509,13 +443,9 @@ document.addEventListener('alpine:init', () => {
 </html>`;
 }
 
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]*>/g, "");
-}
+// ─── Index Page HTML ──────────────────────────────────────────────────────────────
 
-// ─── Alpine.js Index Page ─────────────────────────────────────────────────────────
-
-function alpineIndexHtml(sessions: SessionMeta[]): string {
+function indexPageHtml(sessions: SessionMeta[]): string {
   const sorted = [...sessions].sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
   );
@@ -531,38 +461,71 @@ function alpineIndexHtml(sessions: SessionMeta[]): string {
   );
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Session Archive — super_sessions</title>
-<style>${css()}</style>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class'}</script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+<style>${sharedStyles()}</style>
 </head>
-<body>
-<div class="ic" x-data="indexData">
-  <h1>Session Archive</h1>
-  <div class="meta">
-    Project: ${escHtml(process.cwd())}<br>
-    Generated: ${new Date().toISOString()}<br>
-    Sessions: <span x-text="filtered.length"></span>
-    <span x-show="query"> matching "<span x-text="query"></span>"</span>
+<body class="bg-gray-950 text-gray-100 font-sans antialiased min-h-screen">
+<div class="max-w-2xl mx-auto px-6 py-12" x-data="indexData" x-cloak>
+
+  <!-- Header -->
+  <div class="mb-8">
+    <h1 class="text-2xl font-bold text-blue-400 mb-2">Session Archive</h1>
+    <p class="text-sm text-gray-500">
+      ${escHtml(process.cwd())}<br>
+      Generated ${new Date().toISOString().split("T")[0]}
+    </p>
   </div>
-  <div class="search">
-    <input type="text" x-model="query" placeholder="Search sessions...">
+
+  <!-- Search -->
+  <div class="mb-6">
+    <input type="text" x-model="query" placeholder="Search sessions by name, date, or ID…"
+           class="w-full px-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-sm text-gray-200
+                  placeholder:text-gray-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20
+                  transition-colors">
   </div>
-  <div class="slist">
+
+  <!-- Count -->
+  <div class="text-xs text-gray-500 mb-4">
+    <span x-text="filtered.length"></span> session<span x-show="filtered.length !== 1">s</span>
+    <span x-show="query.trim()"> matching "<span class="text-gray-400" x-text="query"></span>"</span>
+  </div>
+
+  <!-- Session list -->
+  <div class="space-y-3">
     <template x-for="s in filtered" :key="s.file">
-      <a :href="s.file" class="scard">
-        <div class="sd" x-text="s.date"></div>
-        <div class="sn" x-text="s.name"></div>
-        <div class="ss"><span x-text="s.messages"></span> messages · <span x-text="s.id"></span></div>
+      <a :href="s.file"
+         class="block bg-gray-900 border border-gray-800 rounded-lg p-4
+                hover:border-blue-500/40 hover:bg-gray-900/80 transition-colors
+                group">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-gray-200 group-hover:text-blue-300 transition-colors truncate"
+                 x-text="s.name"></div>
+            <div class="text-xs text-gray-500 mt-1 font-mono">
+              <span x-text="s.date"></span>
+              <span class="mx-2">·</span>
+              <span x-text="s.messages"></span> messages
+            </div>
+          </div>
+          <div class="text-[10px] text-gray-600 font-mono shrink-0 mt-0.5" x-text="s.id"></div>
+        </div>
       </a>
     </template>
-    <div x-show="filtered.length === 0" style="color:var(--fg3);text-align:center;padding:40px">
-      No sessions match "<span x-text="query"></span>"
-    </div>
   </div>
+
+  <!-- Empty state -->
+  <div x-show="filtered.length === 0" class="text-center text-gray-600 py-16">
+    <div class="text-4xl mb-3">📭</div>
+    <div class="text-sm">No sessions match "<span class="text-gray-400" x-text="query"></span>"</div>
+  </div>
+
 </div>
 <script>
 document.addEventListener('alpine:init', () => {
@@ -593,7 +556,6 @@ export function generateSessionHtml(
   const allEntries = parseSessionEntries(sessionPath);
   const branch = getActiveBranch(allEntries);
 
-  // Assign depth
   const byId = new Map<string, SessionEntry>();
   for (const e of branch) { if (e.id) byId.set(e.id, e); }
   const serialized = branch.map((e) => {
@@ -607,14 +569,13 @@ export function generateSessionHtml(
 
   const sessionData = { sessionId: meta.id, date: meta.date, name: meta.name, entries: serialized };
   const entriesJson = JSON.stringify(sessionData);
-  const sessionName = meta.name || "Untitled session";
   const metadata = { date: meta.date, sessionId: meta.id, messageCount: meta.messageCount };
 
   const dateStr = meta.date;
   const shortId = meta.id.length > 8 ? meta.id.slice(0, 8) : meta.id;
   const htmlFile = `${dateStr}_${shortId}.html`;
 
-  const html = alpineSessionHtml(sessionName, metadata, entriesJson);
+  const html = sessionViewerHtml(meta.name || "Untitled session", metadata, entriesJson);
   const htmlPath = path.join(htmlDir, htmlFile);
   fs.mkdirSync(path.dirname(htmlPath), { recursive: true });
   fs.writeFileSync(htmlPath, html, "utf-8");
@@ -623,7 +584,7 @@ export function generateSessionHtml(
 }
 
 export function generateIndexHtml(sessions: SessionMeta[], htmlDir: string): string {
-  const html = alpineIndexHtml(sessions);
+  const html = indexPageHtml(sessions);
   const indexPath = path.join(htmlDir, "index.html");
   fs.mkdirSync(path.dirname(indexPath), { recursive: true });
   fs.writeFileSync(indexPath, html, "utf-8");
