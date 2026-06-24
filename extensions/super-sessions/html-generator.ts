@@ -79,6 +79,11 @@ function escHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/** Escape </ sequences in JSON for safe embedding inside <script> tags */
+function escScriptJson(json: string): string {
+  return json.replace(/<\//g, "<\\/");
+}
+
 function mdToHtml(text: string): string {
   let h = escHtml(text);
   h = h.replace(/```([\s\S]*?)```/g, "<pre class=\"bg-gray-100 rounded-lg p-3 overflow-x-auto text-xs font-mono leading-relaxed my-2 border border-gray-200\"><code>$1</code></pre>");
@@ -126,7 +131,7 @@ function serializeForHtml(entry: SessionEntry): Record<string, unknown> {
   }
 
   const displayBlocks: Record<string, unknown>[] = [];
-  if (msg.role === "assistant" && Array.isArray(blocks)) {
+  if (Array.isArray(blocks)) {
     for (const b of blocks as Record<string, unknown>[]) {
       displayBlocks.push({ ...b, entryId: entry.id || "" });
     }
@@ -137,7 +142,7 @@ function serializeForHtml(entry: SessionEntry): Record<string, unknown> {
     timestamp: entry.timestamp || (msg.timestamp ? new Date(msg.timestamp).toISOString() : ""),
     role: msg.role, displayBlocks,
     toolName: msg.toolName, isError: msg.isError,
-    resultText: msg.role === "toolResult" ? extractText(msg.content) : "",
+    resultText: msg.role === "toolResult" ? escHtml(extractText(msg.content)) : "",
   };
 }
 
@@ -232,50 +237,52 @@ function sessionViewerHtml(
 <style>${sharedStyles()}</style>
 </head>
 <body class="bg-white text-gray-900 font-sans antialiased">
+<noscript><div class="flex items-center justify-center h-screen text-gray-400"><p>JavaScript required. Alpine.js may have failed to load.</p></div></noscript>
 <div id="app" x-data="sessionViewer" x-init="init()" x-cloak class="flex h-screen overflow-hidden">
 
   <!-- === SIDEBAR === -->
   <aside id="sidebar"
     class="w-80 min-w-[200px] max-w-[50%] bg-gray-50 border-r border-gray-200 flex flex-col shrink-0 overflow-hidden">
     <!-- Header -->
-    <div class="p-4 border-b border-gray-200 shrink-0">
-      <h2 class="text-sm font-semibold text-blue-600 truncate">${escHtml(sessionName)}</h2>
-      <div class="text-[11px] text-gray-400 mt-1 space-y-0.5">
-        <div>${escHtml(String(metadata.date || ""))}</div>
-        <div>${metadata.messageCount || 0} messages</div>
+    <div class="p-3 border-b border-gray-200 shrink-0">
+      <h2 class="text-xs font-semibold text-blue-600 truncate leading-snug">${escHtml(sessionName)}</h2>
+      <div class="text-[11px] text-gray-400 mt-1">
+        ${escHtml(String(metadata.date || ""))} · ${metadata.messageCount || 0} msgs
       </div>
     </div>
 
     <!-- Toggles -->
-    <div class="px-4 py-2.5 border-b border-gray-200 flex gap-4 shrink-0">
-      <label class="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer select-none">
+    <div class="px-3 py-2 border-b border-gray-200 flex gap-4 shrink-0">
+      <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
         <input type="checkbox" x-model="showThinking"
                class="w-3.5 h-3.5 rounded border-gray-300 text-blue-600">
-        <span>Thinking</span>
+        <span>💭 Thinking</span>
       </label>
-      <label class="flex items-center gap-1.5 text-[11px] text-gray-500 cursor-pointer select-none">
+      <label class="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
         <input type="checkbox" x-model="showTools"
                class="w-3.5 h-3.5 rounded border-gray-300 text-blue-600">
-        <span>Tools</span>
+        <span>🔧 Tools</span>
       </label>
     </div>
 
     <!-- Tree -->
-    <div class="flex-1 overflow-y-auto overflow-x-hidden py-1 font-mono text-[11px]">
+    <div class="flex-1 overflow-y-auto overflow-x-hidden py-1 font-sans text-xs leading-relaxed">
       <template x-for="node in filteredTree" :key="node.id">
         <div @click="scrollTo(node.id)"
              :class="{
-               'bg-blue-100 border-l-blue-500': activeId === node.id,
+               'bg-blue-100 border-l-blue-500 font-medium': activeId === node.id,
                'border-l-transparent hover:bg-gray-100': activeId !== node.id,
                'italic text-gray-400': node.kind === 'think',
-               'text-amber-600': node.kind === 'tool',
-               'text-gray-500': node.kind === 'toolResult',
-               'text-gray-700': node.kind === 'user' || node.kind === 'assistant'
+               'text-amber-700': node.kind === 'tool',
+               'text-gray-400 text-[11px]': node.kind === 'toolResult',
+               'text-gray-800 font-medium': node.kind === 'user',
+               'text-gray-600': node.kind === 'assistant'
              }"
-             :style="'padding-left:' + (node.depth * 14 + 12) + 'px'"
-             class="w-full py-[3px] pr-3 border-l-[3px] cursor-pointer truncate transition-colors">
-          <span class="mr-1 text-gray-400" x-text="node.prefix"></span>
-          <span x-text="node.label || '…'"></span>
+             :style="'padding-left:' + (node.depth * 12 + 12) + 'px'"
+             class="w-full py-1 pr-3 border-l-[3px] cursor-pointer truncate transition-colors"
+             :title="node.label || 'user message'">
+          <span class="mr-1.5" x-text="node.prefix"></span>
+          <span x-text="node.label || '(message)'"></span>
         </div>
       </template>
     </div>
@@ -369,6 +376,13 @@ function sessionViewerHtml(
   <!-- session-data MUST be inside #app so init() finds it -->
   <script id="session-data" type="application/json">${entriesJson}</script>
 </div>
+<!-- FALLBACK: shown when Alpine fails to load -->
+<div id="fallback" class="hidden flex items-center justify-center h-screen text-gray-400 bg-white">
+  <div class="text-center">
+    <p class="text-lg mb-2">Unable to load session viewer.</p>
+    <p class="text-sm">Check your network connection or open the <a href="index.html" class="text-blue-600 underline">session index</a>.</p>
+  </div>
+</div>
 <script>
 document.addEventListener('alpine:init', () => {
   Alpine.data('sessionViewer', () => ({
@@ -424,9 +438,20 @@ document.addEventListener('alpine:init', () => {
   }));
 });
 </script>
+<script>
+// Fallback: if Alpine doesn't init within 3s, show fallback
+setTimeout(() => {
+  const app = document.getElementById('app');
+  if (app && app.hasAttribute('x-cloak')) {
+    app.style.display = 'none';
+    const fb = document.getElementById('fallback');
+    if (fb) fb.style.display = 'flex';
+  }
+}, 3000);
+</script>
 </body>
 </html>`;
-  return html.replace('__ENTRIES_JSON__', entriesJson).replace('__TREE_JSON__', treeJson);
+  return html;
 }
 
 // ─── Index Page HTML ──────────────────────────────────────────────────────────────
@@ -457,6 +482,7 @@ function indexPageHtml(sessions: SessionMeta[]): string {
 <style>${sharedStyles()}</style>
 </head>
 <body class="bg-white text-gray-900 font-sans antialiased min-h-screen">
+<noscript><div class="flex items-center justify-center min-h-screen text-gray-400"><p>JavaScript required to browse sessions.</p></div></noscript>
 <div class="max-w-2xl mx-auto px-6 py-12" x-data="indexData" x-cloak>
 
   <div class="mb-8">
@@ -474,7 +500,7 @@ function indexPageHtml(sessions: SessionMeta[]): string {
                   transition-colors shadow-sm">
   </div>
 
-  <div class="text-xs text-gray-400 mb-4">
+  <div class="text-xs text-gray-400 mb-4" x-show="filtered.length > 0">
     <span x-text="filtered.length"></span> session<span x-show="filtered.length !== 1">s</span>
     <span x-show="query.trim()"> matching "<span class="text-gray-500" x-text="query"></span>"</span>
   </div>
@@ -501,7 +527,7 @@ function indexPageHtml(sessions: SessionMeta[]): string {
     </template>
   </div>
 
-  <div x-show="filtered.length === 0" class="text-center text-gray-400 py-16">
+  <div x-show="filtered.length === 0 && query.trim()" class="text-center text-gray-400 py-16">
     <div class="text-4xl mb-3">📭</div>
     <div class="text-sm">No sessions match "<span class="text-gray-500" x-text="query"></span>"</div>
   </div>
@@ -548,7 +574,7 @@ export function generateSessionHtml(
   });
 
   const sessionData = { sessionId: meta.id, date: meta.date, name: meta.name, entries: serialized };
-  const entriesJson = JSON.stringify(sessionData);
+  const entriesJson = escScriptJson(JSON.stringify(sessionData));
   const metadata = { date: meta.date, sessionId: meta.id, messageCount: meta.messageCount };
 
   const dateStr = meta.date;
