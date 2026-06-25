@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { extractSessionFile, buildIndex, listSessions, parseSessionFrontmatter, type SessionMeta, type SessionFrontmatter } from "./extraction";
 import { generateSessionHtml, generateIndexHtml } from "./html-generator";
 import { handleTagCommand } from "./tagging";
+import { analyzeOneSession } from "./analysis";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
@@ -182,27 +183,31 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ─── Tool: super_sessions_analyze ───────────────────────────────────────────
-  // LLM-callable. Returns a structured task: which sessions to analyze and how.
-  // The agent (me) reads session files, calls the model, and writes analyses.
+  // LLM-callable. Calls a cheap LLM directly for each unmatched session,
+  // writes structured analysis files to analyses/{topic}/{session}.md,
+  // and returns a summary with counts.
 
   pi.registerTool({
     name: "super_sessions_analyze",
     label: "Super Sessions Analyze",
     description:
-      "Prepare topic-specific analysis of session .md files. " +
-      "Returns session paths and extraction instructions. " +
-      "The agent reads each session, extracts observations, and writes analyses/{topic}/{session}.md. " +
-      "Skips sessions already analyzed for this topic (idempotent).",
+      "Extract topic-specific observations from session .md files using a cheap LLM. " +
+      "For each unmatched session, reads the .md file, calls deepseek-v4-flash with a " +
+      "topic-specific extraction prompt, and writes structured analysis to analyses/{topic}/{session}.md. " +
+      "Skips sessions already analyzed for this topic (idempotent). " +
+      "Returns a summary with analyzed, skipped (already done), skipped (not relevant), and skipped (topic mismatch) counts.",
     promptSnippet: "Analyze sessions by topic (cheap model recommended)",
     promptGuidelines: [
       "Use super_sessions_analyze to extract topic-specific observations from sessions. " +
-      "Run /super_sessions first if sessions haven't been exported yet. " +
-      "After calling this tool, read each session file and write analysis to the destination path.",
+      "It calls a cheap LLM directly per session and writes analysis files automatically. " +
+      "Run /super_sessions first if sessions haven't been exported yet.",
     ],
     parameters: Type.Object({
       topic: Type.String({
         description:
-          "Topic to extract, e.g. 'engineering_decisions', 'negotiation', 'architecture', 'debugging_patterns'",
+          "Topic to extract, e.g. 'engineering', 'meaning', 'ideas', 'engineering_decisions', 'negotiation', 'architecture'. " +
+          "Topic influences which extraction prompt template is used: 'engineering' uses analyze-engineering.md, " +
+          "'meaning' uses analyze-meaning.md, 'ideas' uses analyze-ideas.md. Others use a generic fallback.",
       }),
       sessionGlob: Type.Optional(
         Type.String({
@@ -213,7 +218,7 @@ export default function (pi: ExtensionAPI) {
       focusPrompt: Type.Optional(
         Type.String({
           description:
-            "Additional extraction guidance, e.g. 'Focus on database schema decisions only'",
+            "Additional extraction guidance appended to the prompt, e.g. 'Focus on database schema decisions only'",
         }),
       ),
       topics: Type.Optional(
@@ -323,7 +328,7 @@ export default function (pi: ExtensionAPI) {
 
       fs.mkdirSync(analysesDir, { recursive: true });
 
-      // Check which already have analyses
+      // Check which already have analyses (idempotent)
       const toAnalyze: string[] = [];
       let alreadyAnalyzed = 0;
 
@@ -359,63 +364,94 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const sessionPaths = toAnalyze.map((f) => ({
-        file: f,
-        sourcePath: path.join(sessionsDir, f),
-        analysisDest: path.join(analysesDir, f),
-      }));
+      // Analyze each session via cheap LLM
+      const analyzed: string[] = [];
+      const errors: string[] = [];
 
-      const summaryParts: string[] = [
-        `**Sessions to analyze:** ${toAnalyze.length}`,
-      ];
+      for (let i = 0; i < toAnalyze.length; i++) {
+        const file = toAnalyze[i];
+        const sessionPath = path.join(sessionsDir, file);
+        const analysisDest = path.join(analysesDir, file);
+
+        // Report progress
+        ctx.ui.notify(
+          `Analyzing ${i + 1}/${toAnalyze.length}: ${file} for topic "${params.topic}"...`,
+          "info",
+        );
+
+        const result = await analyzeOneSession(
+          sessionPath,
+          analysisDest,
+          params.topic,
+          ctx,
+          params.focusPrompt,
+        );
+
+        if (result.success) {
+          analyzed.push(file);
+        } else {
+          errors.push(`${file}: ${result.error}`);
+          ctx.ui.notify(`⚠️ Analysis failed for ${file}: ${result.error}`, "warning");
+        }
+      }
+
+      // Build summary
+      const summaryParts: string[] = [];
+
+      if (analyzed.length > 0) {
+        summaryParts.push(`Analyzed ${analyzed.length} session${analyzed.length !== 1 ? "s" : ""} for topic "${params.topic}"`);
+      }
       if (alreadyAnalyzed > 0) {
-        summaryParts.push(`${alreadyAnalyzed} already done (skipped)`);
+        summaryParts.push(`${alreadyAnalyzed} skipped (already analyzed)`);
       }
       if (notRelevant.length > 0) {
-        summaryParts.push(`${notRelevant.length} not project relevant (skipped)`);
+        summaryParts.push(`${notRelevant.length} skipped (not project relevant)`);
       }
       if (topicMismatch.length > 0) {
-        summaryParts.push(`${topicMismatch.length} topic mismatch (skipped)`);
+        summaryParts.push(`${topicMismatch.length} skipped (topic mismatch)`);
+      }
+      if (errors.length > 0) {
+        summaryParts.push(`${errors.length} error${errors.length !== 1 ? "s" : ""}`);
       }
       if (topicFilter && topicFilter.length > 0) {
         summaryParts.push(`Filtered by topics: ${topicFilter.join(", ")}`);
       }
 
-      const instructions = [
-        `# Analyze Sessions — Topic: "${params.topic}"`,
-        "",
-        summaryParts.join(". "),
-        params.focusPrompt ? `**Focus:** ${params.focusPrompt}` : "",
-        "",
-        "## Instructions",
-        "",
-        `For each session below, read the clean .md file and extract observations about **${params.topic}**. Write each analysis to the specified destination.`,
-        "",
-        "For each observation include:",
-        "- **Context:** what was being discussed",
-        "- **Observation:** the specific insight, decision, or pattern",
-        "- **Evidence:** relevant quote or paraphrase",
-        "- **Significance:** why this matters to the project",
-        "",
-        "Use a cheap model for extraction. Format as structured markdown.",
-        "",
-        "## Sessions",
-        "",
-        ...sessionPaths.map(
-          (s, i) =>
-            `${i + 1}. **${s.file}** → read \`${s.sourcePath}\`, write to \`${s.analysisDest}\``,
-        ),
-      ].filter(Boolean).join("\n");
+      const summary = summaryParts.join(". ") + ".";
 
       return {
-        content: [{ type: "text", text: instructions }],
+        content: [
+          {
+            type: "text",
+            text: [
+              `## ✅ Analysis Complete — Topic: "${params.topic}"`,
+              "",
+              summary,
+              "",
+              analyzed.length > 0 ? `**Output:** ${analysesDir}` : "",
+              errors.length > 0
+                ? [
+                    "",
+                    "### Errors",
+                    "",
+                    ...errors.map((e) => `- ${e}`),
+                    "",
+                    "Error notes have been written to the analysis files.",
+                  ].join("\n")
+                : "",
+              params.focusPrompt ? `**Focus prompt used:** ${params.focusPrompt}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
+        ],
         details: {
           topic: params.topic,
-          toAnalyze: toAnalyze.length,
+          analyzed: analyzed.length,
           alreadyAnalyzed,
           notRelevant: notRelevant.length,
           topicMismatch: topicMismatch.length,
-          sessionPaths,
+          errors: errors.length,
           analysesDir,
         },
       };
