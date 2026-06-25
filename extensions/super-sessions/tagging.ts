@@ -17,8 +17,8 @@ import { Type } from "typebox";
 
 const INSIGHTS_DIR = "project_insights";
 const SESSIONS_DIR = "sessions";
-const DEFAULT_MODEL = "deepseek-ai/deepseek-v4-flash";
-const DEFAULT_MODEL_PROVIDER = "nvidia";
+const DEFAULT_MODEL = "deepseek-chat";
+const DEFAULT_MODEL_PROVIDER = "deepseek";
 
 /** Directory where tagging prompts live */
 const PROMPTS_DIR = path.join(__dirname, "prompts");

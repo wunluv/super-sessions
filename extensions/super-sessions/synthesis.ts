@@ -14,8 +14,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
 /** SOTA model for synthesis — explicitly named for clarity vs analysis.ts which uses deepseek-v4-flash */
-const DEFAULT_MODEL = "deepseek-ai/deepseek-v4-pro";
-const DEFAULT_MODEL_PROVIDER = "nvidia";
+const DEFAULT_MODEL = "deepseek-v4-pro";
+const DEFAULT_MODEL_PROVIDER = "deepseek";
 const DEFAULT_MAX_TOKENS = 8192;
 
 // ─── Retry Helper ─────────────────────────────────────────────────────────────────
