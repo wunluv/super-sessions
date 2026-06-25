@@ -387,6 +387,8 @@ export async function tagAllUntagged(
     .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md"))
     .sort();
 
+  console.log(`[super_sessions] tagAllUntagged: ${sessionFiles.length} session files found, force=${options?.force ?? false}`);
+
   const total = sessionFiles.length;
   const tagged: TagResult[] = [];
   const skipped: string[] = [];
@@ -417,12 +419,14 @@ export async function tagAllUntagged(
         ctx.ui.notify(`⚠️ Tag failed for ${file}: ${result.error}`, "warning");
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[super_sessions] Tag error for ${file}: ${msg}`);
       errors.push({
         file,
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: msg,
       });
-      ctx.ui.notify(`⚠️ Tag error for ${file}: ${err instanceof Error ? err.message : String(err)}`, "warning");
+      ctx.ui.notify(`⚠️ Tag error for ${file}: ${msg}`, "warning");
     }
   }
 
@@ -439,7 +443,9 @@ export async function handleTagCommand(
 ): Promise<void> {
   // Pre-check: verify the model is available
   const model = ctx.modelRegistry.find(DEFAULT_MODEL_PROVIDER, DEFAULT_MODEL);
+  console.log(`[super_sessions] Model lookup: provider=${DEFAULT_MODEL_PROVIDER}, model=${DEFAULT_MODEL}, found=${!!model}`);
   if (!model) {
+    console.error(`[super_sessions] Model not found! Available providers may not include "${DEFAULT_MODEL_PROVIDER}"`);
     ctx.ui.notify(
       `❌ Model "${DEFAULT_MODEL_PROVIDER}/${DEFAULT_MODEL}" not found. Add it to ~/.pi/agent/models.json under the "${DEFAULT_MODEL_PROVIDER}" provider.`,
       "error",
