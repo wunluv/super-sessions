@@ -168,7 +168,7 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Subcommand: /super_sessions tag ────────────────────────────────────────
 
-  pi.registerCommand("super_sessions tag", {
+  pi.registerCommand("super-sessions-tag", {
     description:
       "Tag untagged session .md files with YAML frontmatter (project_relevant, topics, summary). " +
       "Uses cheap LLM (deepseek-v4-flash). Skips already-tagged files. " +
@@ -180,7 +180,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("super_sessions retag", {
+  pi.registerCommand("super-sessions-retag", {
     description:
       "Alias for 'tag'. Tags only sessions missing frontmatter (same as 'tag' with no --force).",
     handler: async (args, ctx) => {
