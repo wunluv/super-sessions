@@ -443,7 +443,7 @@ export default function (pi: ExtensionAPI) {
         .readdirSync(sessionsDir)
         .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md")).length;
       if (count > 0) {
-        ctx.ui.setStatus("super-sessions", `${count} sessions exported`);
+        ctx.ui.setStatus("super-sessions", `${count} sessions available`);
       }
     }
   });
