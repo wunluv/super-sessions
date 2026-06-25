@@ -17,7 +17,7 @@ import { Type } from "typebox";
 
 const INSIGHTS_DIR = "project_insights";
 const SESSIONS_DIR = "sessions";
-const DEFAULT_MODEL = "deepseek-chat";
+const DEFAULT_MODEL = "deepseek-v4-flash";
 const DEFAULT_MODEL_PROVIDER = "deepseek";
 
 /** Directory where tagging prompts live */
@@ -437,6 +437,22 @@ export async function handleTagCommand(
   ctx: ExtensionCommandContext,
   options?: { force?: boolean; stripNoise?: boolean },
 ): Promise<void> {
+  // Pre-check: verify the model is available
+  const model = ctx.modelRegistry.find(DEFAULT_MODEL_PROVIDER, DEFAULT_MODEL);
+  if (!model) {
+    ctx.ui.notify(
+      `❌ Model "${DEFAULT_MODEL_PROVIDER}/${DEFAULT_MODEL}" not found. Add it to ~/.pi/agent/models.json under the "${DEFAULT_MODEL_PROVIDER}" provider.`,
+      "error",
+    );
+    return;
+  }
+
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
+    ctx.ui.notify(`❌ No API key for "${DEFAULT_MODEL_PROVIDER}" provider: ${auth.error}`, "error");
+    return;
+  }
+
   ctx.ui.notify("Tagging untagged sessions...", "info");
 
   const summary = await tagAllUntagged(ctx, { force: options?.force });
@@ -461,7 +477,12 @@ export async function handleTagCommand(
   }
 
   const message = parts.join(". ") || "No untagged sessions found.";
-  ctx.ui.notify(`✅ ${message}`, errorCount > 0 ? "warning" : "info");
+  const statusMsg = errorCount > 0
+    ? `⚠️ ${message} — ${errorCount} session(s) failed (check console for details)`
+    : taggedCount > 0
+      ? `✅ ${message}`
+      : `ℹ️ ${message}`;
+  ctx.ui.notify(statusMsg, errorCount > 0 ? "error" : taggedCount > 0 ? "success" : "info");
 
   // Log errors
   for (const err of summary.errors) {

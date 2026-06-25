@@ -13,7 +13,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
-const DEFAULT_MODEL = "deepseek-chat";
+const DEFAULT_MODEL = "deepseek-v4-flash";
 const DEFAULT_MODEL_PROVIDER = "deepseek";
 const DEFAULT_MAX_TOKENS = 4096;
 
