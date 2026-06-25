@@ -395,6 +395,120 @@ export function extractSessionFile(
   };
 }
 
+// ─── Frontmatter Parsing ──────────────────────────────────────────────────────
+
+export interface SessionFrontmatter {
+  /** Whether this session is relevant to the project */
+  project_relevant: boolean;
+  /** Topics discussed in this session */
+  topics: string[];
+  /** One-sentence summary of the session */
+  summary: string;
+  /** Whether noise has been stripped from the body */
+  noise_stripped: boolean;
+}
+
+/**
+ * Parse YAML frontmatter from a session .md file.
+ * Returns default values if no frontmatter exists.
+ *
+ * Files without frontmatter are treated as project_relevant: true
+ * by default, since untagged sessions haven't been classified yet.
+ *
+ * Performs simple line-by-line parsing (no YAML library dependency).
+ */
+export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const lines = content.split("\n");
+
+    // Check for opening ---
+    if (lines.length < 2 || lines[0].trim() !== "---") {
+      return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
+    }
+
+    // Find closing ---
+    let closingIndex = -1;
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === "---") {
+        closingIndex = i;
+        break;
+      }
+    }
+
+    if (closingIndex < 0) {
+      return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
+    }
+
+    // Parse frontmatter lines (between opening and closing ---)
+    const fmLines = lines.slice(1, closingIndex);
+
+    // Parse project_relevant: true/false
+    const projectRelevant = (() => {
+      const line = fmLines.find((l) => /^project_relevant:\s*(true|false)/.test(l));
+      if (line) {
+        // Match true or false (ignore any inline comment after)
+        const match = line.match(/^project_relevant:\s*(true|false)/);
+        return match ? match[1] === "true" : true;
+      }
+      return true;
+    })();
+
+    // Parse topics array
+    const topics = (() => {
+      const result: string[] = [];
+      let inTopics = false;
+      for (const line of fmLines) {
+        if (/^topics:/.test(line)) {
+          inTopics = true;
+          continue;
+        }
+        if (inTopics) {
+          if (/^\s+-\s/.test(line)) {
+            const topic = line.replace(/^\s+-\s+/, "").trim();
+            if (topic) result.push(topic);
+          } else if (/^\S/.test(line)) {
+            inTopics = false;
+          }
+        }
+      }
+      return result;
+    })();
+
+    // Parse summary
+    const summary = (() => {
+      const line = fmLines.find((l) => /^summary:/.test(l));
+      if (line) {
+        return line
+          .replace(/^summary:\s*/, "")
+          .replace(/^"|"$/g, "")
+          .trim();
+      }
+      return "";
+    })();
+
+    // Parse noise_stripped: true/false
+    const noiseStripped = (() => {
+      const line = fmLines.find((l) => /^noise_stripped:\s*(true|false)/.test(l));
+      if (line) {
+        const match = line.match(/^noise_stripped:\s*(true|false)/);
+        return match ? match[1] === "true" : false;
+      }
+      return false;
+    })();
+
+    return {
+      project_relevant: projectRelevant,
+      topics,
+      summary,
+      noise_stripped: noiseStripped,
+    };
+  } catch {
+    // If file can't be read, treat as relevant by default
+    return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
+  }
+}
+
 /**
  * Build index.md manifest from session metadata array.
  */

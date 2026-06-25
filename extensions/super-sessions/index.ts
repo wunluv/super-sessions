@@ -11,7 +11,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { extractSessionFile, buildIndex, listSessions, type SessionMeta } from "./extraction";
+import { extractSessionFile, buildIndex, listSessions, parseSessionFrontmatter, type SessionMeta, type SessionFrontmatter } from "./extraction";
 import { generateSessionHtml, generateIndexHtml } from "./html-generator";
 import { handleTagCommand } from "./tagging";
 
@@ -216,12 +216,21 @@ export default function (pi: ExtensionAPI) {
             "Additional extraction guidance, e.g. 'Focus on database schema decisions only'",
         }),
       ),
+      topics: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Optional filter: only include sessions whose frontmatter topics overlap with this list. " +
+            "E.g. ['architecture', 'authentication'] includes sessions tagged with any of these topics. " +
+            "If omitted, all project-relevant sessions are included.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const cwd = ctx.cwd;
       const sessionsDir = getSessionsDir(cwd);
       const analysesDir = path.join(getAnalysesDir(cwd), params.topic);
       const glob = params.sessionGlob || "all";
+      const topicFilter = params.topics;
 
       if (!fs.existsSync(sessionsDir)) {
         return {
@@ -252,6 +261,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Match sessions by glob
       const matched = sessionFiles.filter((f) => {
         if (glob === "all") return true;
         const globRe = new RegExp("^" + glob.replace(/\*/g, ".*") + ".*\\.md$");
@@ -270,14 +280,57 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      fs.mkdirSync(analysesDir, { recursive: true });
-      const toAnalyze: string[] = [];
-      let skipped = 0;
+      // Filter by frontmatter
+      const relevant: string[] = [];
+      const notRelevant: string[] = [];
+      const topicMismatch: string[] = [];
 
       for (const file of matched) {
+        const sessionPath = path.join(sessionsDir, file);
+        const fm = parseSessionFrontmatter(sessionPath);
+
+        if (!fm.project_relevant) {
+          notRelevant.push(file);
+          continue;
+        }
+
+        if (topicFilter && topicFilter.length > 0) {
+          const hasTopic = topicFilter.some((t) =>
+            fm.topics.some((st) => st.toLowerCase() === t.toLowerCase()),
+          );
+          if (!hasTopic) {
+            topicMismatch.push(file);
+            continue;
+          }
+        }
+
+        relevant.push(file);
+      }
+
+      if (relevant.length === 0) {
+        const parts: string[] = ["No sessions available for analysis"];
+        if (notRelevant.length > 0) {
+          parts.push(`${notRelevant.length} filtered out (not project relevant)`);
+        }
+        if (topicMismatch.length > 0) {
+          parts.push(`${topicMismatch.length} filtered out (topic mismatch)`);
+        }
+        return {
+          content: [{ type: "text", text: parts.join(". ") + "." }],
+          details: { topic: params.topic, matched: matched.length, notRelevant: notRelevant.length, topicMismatch: topicMismatch.length },
+        };
+      }
+
+      fs.mkdirSync(analysesDir, { recursive: true });
+
+      // Check which already have analyses
+      const toAnalyze: string[] = [];
+      let alreadyAnalyzed = 0;
+
+      for (const file of relevant) {
         const analysisPath = path.join(analysesDir, file);
         if (fs.existsSync(analysisPath)) {
-          skipped++;
+          alreadyAnalyzed++;
         } else {
           toAnalyze.push(file);
         }
@@ -288,10 +341,21 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `All ${matched.length} sessions already analyzed for topic "${params.topic}". Use --force to regenerate.`,
+              text: [
+                `All ${relevant.length} relevant sessions already analyzed for topic "${params.topic}".`,
+                alreadyAnalyzed > 0 ? `${alreadyAnalyzed} already analyzed.` : "",
+                notRelevant.length > 0 ? `${notRelevant.length} skipped (not project relevant).` : "",
+                topicMismatch.length > 0 ? `${topicMismatch.length} skipped (topic mismatch).` : "",
+              ].filter(Boolean).join(" "),
             },
           ],
-          details: { topic: params.topic, total: matched.length, skipped },
+          details: {
+            topic: params.topic,
+            total: relevant.length,
+            alreadyAnalyzed,
+            notRelevant: notRelevant.length,
+            topicMismatch: topicMismatch.length,
+          },
         };
       }
 
@@ -301,10 +365,26 @@ export default function (pi: ExtensionAPI) {
         analysisDest: path.join(analysesDir, f),
       }));
 
+      const summaryParts: string[] = [
+        `**Sessions to analyze:** ${toAnalyze.length}`,
+      ];
+      if (alreadyAnalyzed > 0) {
+        summaryParts.push(`${alreadyAnalyzed} already done (skipped)`);
+      }
+      if (notRelevant.length > 0) {
+        summaryParts.push(`${notRelevant.length} not project relevant (skipped)`);
+      }
+      if (topicMismatch.length > 0) {
+        summaryParts.push(`${topicMismatch.length} topic mismatch (skipped)`);
+      }
+      if (topicFilter && topicFilter.length > 0) {
+        summaryParts.push(`Filtered by topics: ${topicFilter.join(", ")}`);
+      }
+
       const instructions = [
         `# Analyze Sessions — Topic: "${params.topic}"`,
         "",
-        `**Sessions to analyze:** ${toAnalyze.length} (${skipped} already done, skipped)`,
+        summaryParts.join(". "),
         params.focusPrompt ? `**Focus:** ${params.focusPrompt}` : "",
         "",
         "## Instructions",
@@ -332,7 +412,9 @@ export default function (pi: ExtensionAPI) {
         details: {
           topic: params.topic,
           toAnalyze: toAnalyze.length,
-          skipped,
+          alreadyAnalyzed,
+          notRelevant: notRelevant.length,
+          topicMismatch: topicMismatch.length,
           sessionPaths,
           analysesDir,
         },
@@ -365,12 +447,28 @@ export default function (pi: ExtensionAPI) {
             "Output format: 'blueprint' (default), 'summary', or 'timeline'",
         }),
       ),
+      sessionGlob: Type.Optional(
+        Type.String({
+          description:
+            "Glob to filter analyses by session, e.g. '2026-06-*' or 'all'. Defaults to 'all'.",
+        }),
+      ),
+      topics: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "Optional filter: only include analyses from sessions whose frontmatter topics overlap with this list. " +
+            "E.g. ['architecture', 'authentication']. If omitted, all project-relevant sessions are included.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const cwd = ctx.cwd;
       const analysesDir = path.join(getAnalysesDir(cwd), params.topic);
+      const sessionsDir = getSessionsDir(cwd);
       const wisdomDir = getWisdomDir(cwd);
       const format = params.outputFormat || "blueprint";
+      const glob = params.sessionGlob || "all";
+      const topicFilter = params.topics;
 
       if (!fs.existsSync(analysesDir)) {
         return {
@@ -401,11 +499,57 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // Read all analyses
-      const analyses: { file: string; content: string }[] = [];
+      // Filter analyses by glob, then by frontmatter
+      const filteredAnalyses: { file: string; content: string }[] = [];
+      let notRelevant = 0;
+      let topicMismatch = 0;
+      let globSkipped = 0;
+
       for (const file of analysisFiles) {
+        // Apply glob filter
+        if (glob !== "all") {
+          const globRe = new RegExp("^" + glob.replace(/\*/g, ".*") + ".*\\.md$");
+          if (!globRe.test(file)) {
+            globSkipped++;
+            continue;
+          }
+        }
+
+        // Read source session frontmatter
+        const sessionPath = path.join(sessionsDir, file);
+        if (fs.existsSync(sessionPath)) {
+          const fm = parseSessionFrontmatter(sessionPath);
+
+          if (!fm.project_relevant) {
+            notRelevant++;
+            continue;
+          }
+
+          if (topicFilter && topicFilter.length > 0) {
+            const hasTopic = topicFilter.some((t) =>
+              fm.topics.some((st) => st.toLowerCase() === t.toLowerCase()),
+            );
+            if (!hasTopic) {
+              topicMismatch++;
+              continue;
+            }
+          }
+        }
+
+        // Include this analysis
         const content = fs.readFileSync(path.join(analysesDir, file), "utf-8");
-        analyses.push({ file, content });
+        filteredAnalyses.push({ file, content });
+      }
+
+      if (filteredAnalyses.length === 0) {
+        const parts: string[] = [`No analyses available for synthesis of topic "${params.topic}".`];
+        if (globSkipped > 0) parts.push(`${globSkipped} filtered out by glob.`);
+        if (notRelevant > 0) parts.push(`${notRelevant} filtered out (not project relevant).`);
+        if (topicMismatch > 0) parts.push(`${topicMismatch} filtered out (topic mismatch).`);
+        return {
+          content: [{ type: "text", text: parts.join(" ") }],
+          details: { topic: params.topic, total: analysisFiles.length, globSkipped, notRelevant, topicMismatch },
+        };
       }
 
       // Read index for timeline context
@@ -417,11 +561,21 @@ export default function (pi: ExtensionAPI) {
 
       fs.mkdirSync(wisdomDir, { recursive: true });
 
+      const summaryParts: string[] = [
+        `**Sources:** ${filteredAnalyses.length} analysis files (from ${analysisFiles.length} total)`,
+      ];
+      if (globSkipped > 0) summaryParts.push(`${globSkipped} excluded by glob`);
+      if (notRelevant > 0) summaryParts.push(`${notRelevant} excluded (not project relevant)`);
+      if (topicMismatch > 0) summaryParts.push(`${topicMismatch} excluded (topic mismatch)`);
+      if (topicFilter && topicFilter.length > 0) {
+        summaryParts.push(`Filtered by topics: ${topicFilter.join(", ")}`);
+      }
+
       const instructions = [
         `# Synthesize — Topic: "${params.topic}"`,
         "",
         `**Format:** ${format}`,
-        `**Sources:** ${analyses.length} analysis files`,
+        summaryParts.join(". "),
         `**Output:** \`${path.join(wisdomDir, `${params.topic}.md`)}\``,
         "",
         "## Instructions",
@@ -441,7 +595,7 @@ export default function (pi: ExtensionAPI) {
         "",
         "## Per-Session Analyses",
         "",
-        ...analyses.map(
+        ...filteredAnalyses.map(
           (a, i) => `### ${i + 1}. ${a.file}\n\n${a.content}`,
         ),
       ].join("\n");
@@ -451,7 +605,10 @@ export default function (pi: ExtensionAPI) {
         details: {
           topic: params.topic,
           format,
-          sourceCount: analyses.length,
+          sourceCount: filteredAnalyses.length,
+          totalAnalyses: analysisFiles.length,
+          notRelevant,
+          topicMismatch,
           wisdomPath: path.join(wisdomDir, `${params.topic}.md`),
         },
       };
