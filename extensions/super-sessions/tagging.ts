@@ -37,6 +37,28 @@ function getAgentsMdPath(cwd: string): string {
   return path.join(cwd, "AGENTS.md");
 }
 
+/** Sleep for N ms */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retry an async function once on failure with a delay.
+ * Logs the first failure and re-throws if the retry also fails.
+ */
+async function retryOnce<T>(
+  fn: () => Promise<T>,
+  label: string,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (firstErr) {
+    console.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
+    await sleep(2000);
+    return await fn();
+  }
+}
+
 /** Check if a .md file already has YAML frontmatter (first line is `---`) */
 function hasFrontmatter(filePath: string): boolean {
   try {
@@ -275,10 +297,24 @@ export async function tagOneSession(
 
   const projectContext = readProjectContext(ctx.cwd);
   const sessionBody = extractSessionBody(filePath);
+
+  // Skip empty sessions (no body content to tag)
+  if (!sessionBody.trim()) {
+    console.warn(`[super_sessions] Empty session body in ${path.basename(filePath)} — skipping`);
+    return {
+      file: path.basename(filePath),
+      success: false,
+      error: "Empty session body — nothing to tag",
+    };
+  }
+
   const truncated = truncateSessionBody(sessionBody);
 
   const prompt = buildTaggingPrompt(truncated, projectContext);
-  const response = await callModelForTagging(prompt, ctx);
+  const response = await retryOnce(
+    () => callModelForTagging(prompt, ctx),
+    `tagging ${path.basename(filePath)}`,
+  );
 
   if (!response) {
     return {
@@ -288,12 +324,31 @@ export async function tagOneSession(
     };
   }
 
-  const frontmatterLines = parseTagResponse(response);
+  let frontmatterLines = parseTagResponse(response);
+
+  // Retry with stricter prompt if YAML parsing failed
+  if (!frontmatterLines) {
+    console.warn(
+      `[super_sessions] Invalid YAML from LLM for ${path.basename(filePath)}, retrying with stricter prompt...`,
+    );
+    const strictPrompt =
+      prompt +
+      "\n\nIMPORTANT: Return ONLY valid YAML. No markdown, no code fences, no extra text. Every field is required: project_relevant, topics, summary, noise_stripped.";
+    try {
+      const retryResponse = await callModelForTagging(strictPrompt, ctx);
+      if (retryResponse) {
+        frontmatterLines = parseTagResponse(retryResponse);
+      }
+    } catch {
+      // fall through to original failure below
+    }
+  }
+
   if (!frontmatterLines) {
     return {
       file: path.basename(filePath),
       success: false,
-      error: "Could not parse LLM response as YAML frontmatter",
+      error: "Could not parse LLM response as YAML frontmatter after retry",
     };
   }
 
@@ -332,18 +387,24 @@ export async function tagAllUntagged(
     .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md"))
     .sort();
 
+  const total = sessionFiles.length;
   const tagged: TagResult[] = [];
   const skipped: string[] = [];
   const errors: TagResult[] = [];
+  let processed = 0;
 
   for (const file of sessionFiles) {
     const filePath = path.join(sessionsDir, file);
+    processed++;
 
     // Skip if already has frontmatter (unless --force)
     if (!options?.force && hasFrontmatter(filePath)) {
       skipped.push(file);
+      console.warn(`[super_sessions] Skipping ${file} (already tagged)`);
       continue;
     }
+
+    ctx.ui.notify(`Tagging ${processed}/${total}: ${file}...`, "info");
 
     try {
       const result = await tagOneSession(filePath, ctx);
@@ -353,6 +414,7 @@ export async function tagAllUntagged(
         tagged.push(result);
       } else {
         errors.push(result);
+        ctx.ui.notify(`⚠️ Tag failed for ${file}: ${result.error}`, "warning");
       }
     } catch (err) {
       errors.push({
@@ -360,6 +422,7 @@ export async function tagAllUntagged(
         success: false,
         error: err instanceof Error ? err.message : String(err),
       });
+      ctx.ui.notify(`⚠️ Tag error for ${file}: ${err instanceof Error ? err.message : String(err)}`, "warning");
     }
   }
 

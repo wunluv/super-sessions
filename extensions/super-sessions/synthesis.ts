@@ -18,6 +18,25 @@ const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_MODEL_PROVIDER = "deepseek";
 const DEFAULT_MAX_TOKENS = 8192;
 
+// ─── Retry Helper ─────────────────────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryOnce<T>(
+  fn: () => Promise<T>,
+  label: string,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (firstErr) {
+    console.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
+    await sleep(2000);
+    return await fn();
+  }
+}
+
 // ─── Output Format Descriptions ───────────────────────────────────────────────────
 
 const FORMAT_INSTRUCTIONS: Record<string, string> = {
@@ -270,6 +289,13 @@ export async function runSynthesis(
         }))
       : input.analyses;
 
+  // Note if only a single analysis (limited cross-session value)
+  if (analyses.length === 1) {
+    console.warn(
+      `[super_sessions] Synthesis for "${input.topic}" uses only 1 analysis — cross-session pattern detection will be limited`,
+    );
+  }
+
   const prompt = buildSynthesisPrompt(
     input.topic,
     input.format,
@@ -279,8 +305,15 @@ export async function runSynthesis(
 
   const truncatedPrompt = truncateForSynthesis(prompt, 150000);
 
+  // Report prompt size for debugging
+  const promptSizeKB = Math.round(truncatedPrompt.length / 1024);
+  console.log(`[super_sessions] Synthesis prompt: ${promptSizeKB}KB across ${analyses.length} analyses`);
+
   try {
-    const response = await callSynthesisModel(truncatedPrompt, ctx);
+    const response = await retryOnce(
+      () => callSynthesisModel(truncatedPrompt, ctx),
+      `synthesize ${input.topic}`,
+    );
 
     if (!response) {
       return {
@@ -289,9 +322,19 @@ export async function runSynthesis(
       };
     }
 
+    // If single analysis, prepend a note about limited cross-session scope
+    let content = response;
+    if (analyses.length === 1) {
+      content =
+        `> **Note:** This synthesis is based on a single analysis session. ` +
+        `Cross-session patterns and evolution tracking require multiple sessions. ` +
+        `Run super_sessions_analyze on additional sessions for a richer synthesis.\n\n` +
+        response;
+    }
+
     return {
       success: true,
-      content: response,
+      content,
     };
   } catch (err) {
     return {

@@ -138,6 +138,11 @@ function parseSessionHeader(filePath: string): { id: string; timestamp: string; 
 /**
  * Parse all entries from a session JSONL file.
  * Returns entries in order (skips the header line).
+ *
+ * Edge cases:
+ * - Corrupt JSONL lines: logged with console.warn, skipped, processing continues
+ * - Unreadable file: logged with console.error, returns empty array
+ * - Empty file (header only): returns empty array
  */
 function parseSessionEntries(filePath: string): SessionEntry[] {
   try {
@@ -145,17 +150,24 @@ function parseSessionEntries(filePath: string): SessionEntry[] {
     const lines = content.split("\n").filter(Boolean);
 
     const entries: SessionEntry[] = [];
+    let corruptCount = 0;
     for (let i = 1; i < lines.length; i++) {
       // skip header (line 0)
       try {
         const entry = JSON.parse(lines[i]);
         entries.push(entry);
       } catch {
-        // skip unparseable lines
+        corruptCount++;
       }
     }
+
+    if (corruptCount > 0) {
+      console.warn(`[super_sessions] ${corruptCount} corrupt JSONL line(s) in ${path.basename(filePath)} — skipped`);
+    }
+
     return entries;
-  } catch {
+  } catch (err) {
+    console.error(`[super_sessions] Could not read session file ${path.basename(filePath)}: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }
@@ -212,8 +224,18 @@ function getActiveBranch(entries: SessionEntry[]): SessionEntry[] {
 
 function formatTimestamp(ts: number | string | undefined): string {
   if (!ts) return "?";
-  if (typeof ts === "string") return ts;
-  return new Date(ts).toISOString();
+  if (typeof ts === "string") {
+    // Check for malformed date string
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "?";
+    return ts;
+  }
+  if (typeof ts === "number") {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "?";
+    return d.toISOString();
+  }
+  return "?";
 }
 
 /** Extract human-readable summary from first user message */
@@ -350,10 +372,17 @@ export function extractSessionFile(
 ): SessionMeta | null {
   // Parse entries
   const allEntries = parseSessionEntries(sessionPath);
-  if (allEntries.length === 0) return null;
+  if (allEntries.length === 0) {
+    console.warn(`[super_sessions] Empty session file: ${path.basename(sessionPath)} — skipping`);
+    return null;
+  }
 
   // Get active branch (walk from leaf to root)
   const branch = getActiveBranch(allEntries);
+  if (branch.length === 0) {
+    console.warn(`[super_sessions] No active branch in ${path.basename(sessionPath)} — skipping`);
+    return null;
+  }
 
   const dateStr = rawInfo.timestamp.split("T")[0];
   const shortId = rawInfo.id.length > 8 ? rawInfo.id.slice(0, 8) : rawInfo.id;
@@ -369,6 +398,12 @@ export function extractSessionFile(
     if (msg?.role === "assistant") assistantMsgs++;
   }
 
+  // Skip sessions with no user or assistant messages (e.g. tool-only sessions)
+  if (userMsgs === 0 && assistantMsgs === 0) {
+    console.warn(`[super_sessions] Session ${baseName} has no user or assistant messages — skipping`);
+    return null;
+  }
+
   const sessionName = getSessionName(branch);
 
   // Generate clean .md
@@ -378,11 +413,19 @@ export function extractSessionFile(
   fs.mkdirSync(path.dirname(cleanPath), { recursive: true });
   fs.writeFileSync(cleanPath, cleanHeader + cleanMd, "utf-8");
 
-  // Generate full .md
+  // Generate full .md with truncation check for very large sessions
   const fullMd = buildFullMd(branch);
+  const MARKDOWN_SIZE_LIMIT = 500000; // 500KB max per file
+  const fullBody = fullMd.length > MARKDOWN_SIZE_LIMIT
+    ? fullMd.slice(0, MARKDOWN_SIZE_LIMIT) +
+      `\n\n[... _full.md truncated at ${MARKDOWN_SIZE_LIMIT} characters — ${fullMd.length} total in source ...]`
+    : fullMd;
+  if (fullMd.length > MARKDOWN_SIZE_LIMIT) {
+    console.warn(`[super_sessions] ${baseName}_full.md truncated (${fullMd.length} chars > ${MARKDOWN_SIZE_LIMIT} limit)`);
+  }
   const fullPath = path.join(outputDir, `${baseName}_full.md`);
   const fullHeader = `# ${sessionName} (Full)\n\n**Session:** ${baseName}\n**Date:** ${dateStr}\n**Project:** ${rawInfo.cwd}\n**Messages:** ${userMsgs} user, ${assistantMsgs} assistant\n\n> Includes thinking blocks, tool calls, and tool results.\n\n---\n`;
-  fs.writeFileSync(fullPath, fullHeader + fullMd, "utf-8");
+  fs.writeFileSync(fullPath, fullHeader + fullBody, "utf-8");
 
   return {
     file: sessionPath,
@@ -415,6 +458,12 @@ export interface SessionFrontmatter {
  * Files without frontmatter are treated as project_relevant: true
  * by default, since untagged sessions haven't been classified yet.
  *
+ * Edge cases:
+ * - Invalid YAML: warns and treats as untagged (returns defaults)
+ * - Missing closing ---: warns and treats as untagged
+ * - Empty file: returns defaults without warning
+ * - Malformed list items in topics: gracefully skips them
+ *
  * Performs simple line-by-line parsing (no YAML library dependency).
  */
 export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
@@ -437,19 +486,28 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
     }
 
     if (closingIndex < 0) {
+      console.warn(`[super_sessions] Unclosed YAML frontmatter in ${path.basename(filePath)} — treating as untagged`);
       return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
     }
 
     // Parse frontmatter lines (between opening and closing ---)
     const fmLines = lines.slice(1, closingIndex);
 
+    if (fmLines.length === 0) {
+      console.warn(`[super_sessions] Empty YAML frontmatter block in ${path.basename(filePath)} — treating as untagged`);
+      return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
+    }
+
     // Parse project_relevant: true/false
     const projectRelevant = (() => {
       const line = fmLines.find((l) => /^project_relevant:\s*(true|false)/.test(l));
       if (line) {
-        // Match true or false (ignore any inline comment after)
         const match = line.match(/^project_relevant:\s*(true|false)/);
-        return match ? match[1] === "true" : true;
+        if (!match) {
+          console.warn(`[super_sessions] Could not parse project_relevant value in ${path.basename(filePath)}: ${line.trim()}`);
+          return true;
+        }
+        return match[1] === "true";
       }
       return true;
     })();
@@ -465,7 +523,7 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
         }
         if (inTopics) {
           if (/^\s+-\s/.test(line)) {
-            const topic = line.replace(/^\s+-\s+/, "").trim();
+            const topic = line.replace(/^\s+-\s+/, "").trim().replace(/^"|"$/g, "");
             if (topic) result.push(topic);
           } else if (/^\S/.test(line)) {
             inTopics = false;
@@ -479,10 +537,17 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
     const summary = (() => {
       const line = fmLines.find((l) => /^summary:/.test(l));
       if (line) {
-        return line
+        const val = line
           .replace(/^summary:\s*/, "")
           .replace(/^"|"$/g, "")
+          .replace(/^'|'$/g, "")
           .trim();
+        // Reject if the value is clearly malformed (e.g. another key)
+        if (/^\w+:/.test(val)) {
+          console.warn(`[super_sessions] Malformed summary value in ${path.basename(filePath)}: ${line.trim()}`);
+          return "";
+        }
+        return val;
       }
       return "";
     })();
@@ -503,8 +568,8 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
       summary,
       noise_stripped: noiseStripped,
     };
-  } catch {
-    // If file can't be read, treat as relevant by default
+  } catch (err) {
+    console.warn(`[super_sessions] Could not read ${path.basename(filePath)} for frontmatter parsing: ${err instanceof Error ? err.message : String(err)}`);
     return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
   }
 }

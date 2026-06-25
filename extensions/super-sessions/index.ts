@@ -75,7 +75,11 @@ async function runMechanicalExtraction(ctx: ExtensionCommandContext): Promise<{
 
   ctx.ui.notify(`Found ${sessionInfos.length} sessions. Extracting...`, "info");
 
-  for (const info of sessionInfos) {
+  for (let i = 0; i < sessionInfos.length; i++) {
+    const info = sessionInfos[i];
+    const fileName = path.basename(info.path);
+    ctx.ui.notify(`Extracting ${i + 1}/${sessionInfos.length}: ${fileName}...`, "info");
+
     try {
       const meta = extractSessionFile(info.path, sessionsDir, info);
       if (meta) {
@@ -84,9 +88,11 @@ async function runMechanicalExtraction(ctx: ExtensionCommandContext): Promise<{
         extracted++;
       } else {
         failed++;
+        console.warn(`[super_sessions] Skipped ${fileName} (no extractable content)`);
       }
-    } catch {
+    } catch (err) {
       failed++;
+      console.error(`[super_sessions] Extraction error for ${fileName}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

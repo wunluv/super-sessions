@@ -20,6 +20,25 @@ const DEFAULT_MAX_TOKENS = 4096;
 /** Directory where analysis prompts live */
 const PROMPTS_DIR = path.join(__dirname, "prompts");
 
+// ─── Retry Helper ─────────────────────────────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryOnce<T>(
+  fn: () => Promise<T>,
+  label: string,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (firstErr) {
+    console.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
+    await sleep(2000);
+    return await fn();
+  }
+}
+
 // ─── Topic → Prompt Template Mapping ─────────────────────────────────────────────
 
 /**
@@ -302,16 +321,28 @@ export async function analyzeOneSession(
     };
   }
 
+  // Skip empty sessions
+  if (!body.trim()) {
+    return {
+      file: fileName,
+      success: false,
+      error: "Empty session body — nothing to analyze",
+    };
+  }
+
   // Truncate body for LLM context window
   const truncated = truncateSessionBody(body);
 
   // Build the prompt
   const prompt = buildAnalyzePrompt(topic, sessionName, date, truncated, focusPrompt);
 
-  // Call the LLM
+  // Call the LLM with retry
   let response: string | null;
   try {
-    response = await callAnalyzeModel(prompt, ctx);
+    response = await retryOnce(
+      () => callAnalyzeModel(prompt, ctx),
+      `analyzing ${fileName}`,
+    );
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     // Write error note to analysis file instead of crashing
