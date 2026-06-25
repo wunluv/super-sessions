@@ -15,6 +15,7 @@ import { extractSessionFile, buildIndex, listSessions, parseSessionFrontmatter, 
 import { generateSessionHtml, generateIndexHtml } from "./html-generator";
 import { handleTagCommand } from "./tagging";
 import { analyzeOneSession } from "./analysis";
+import { runSynthesis } from "./synthesis";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
@@ -459,19 +460,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ─── Tool: super_sessions_synthesize ────────────────────────────────────────
+  // LLM-callable. Calls a SOTA LLM directly for cross-session synthesis,
+  // reads all analysis files for a topic, and writes the synthesized blueprint
+  // to wisdom/{topic}.md.
 
   pi.registerTool({
     name: "super_sessions_synthesize",
     label: "Super Sessions Synthesize",
     description:
-      "Synthesize per-session analyses into a coherent blueprint. " +
-      "Reads all analyses/{topic}/*.md, provides them as context for synthesis. " +
-      "The agent writes the result to wisdom/{topic}.md.",
-    promptSnippet: "Synthesize session analyses into a blueprint/document",
+      "Synthesize per-session analyses into a coherent blueprint using a SOTA model. " +
+      "Reads all analyses/{topic}/*.md, calls deepseek-v4-pro directly to synthesize, " +
+      "and writes the result to wisdom/{topic}.md.",
+    promptSnippet: "Synthesize session analyses into a blueprint/document (SOTA model)",
     promptGuidelines: [
       "Use super_sessions_synthesize after super_sessions_analyze to produce cross-session wisdom. " +
-      "Reads all per-session analyses for a topic and provides synthesis instructions. " +
-      "Write the synthesis document to wisdom/{topic}.md.",
+      "It calls a SOTA model (deepseek-v4-pro) directly, reads all per-session analyses, " +
+      "and writes the synthesis to wisdom/{topic}.md automatically.",
     ],
     parameters: Type.Object({
       topic: Type.String({
@@ -551,7 +555,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
 
-        // Read source session frontmatter
+        // Read source session frontmatter for filtering
         const sessionPath = path.join(sessionsDir, file);
         if (fs.existsSync(sessionPath)) {
           const fm = parseSessionFrontmatter(sessionPath);
@@ -588,56 +592,116 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // Read index for timeline context
+      // Read index for session timeline context
       let indexContent = "";
       const indexPath = path.join(getInsightsRoot(cwd), "index.md");
       if (fs.existsSync(indexPath)) {
         indexContent = fs.readFileSync(indexPath, "utf-8");
       }
 
+      // Ensure wisdom directory exists
       fs.mkdirSync(wisdomDir, { recursive: true });
 
-      const summaryParts: string[] = [
-        `**Sources:** ${filteredAnalyses.length} analysis files (from ${analysisFiles.length} total)`,
-      ];
-      if (globSkipped > 0) summaryParts.push(`${globSkipped} excluded by glob`);
-      if (notRelevant > 0) summaryParts.push(`${notRelevant} excluded (not project relevant)`);
-      if (topicMismatch > 0) summaryParts.push(`${topicMismatch} excluded (topic mismatch)`);
-      if (topicFilter && topicFilter.length > 0) {
-        summaryParts.push(`Filtered by topics: ${topicFilter.join(", ")}`);
+      // Report synthesis in progress
+      ctx.ui.notify(
+        `Synthesizing ${filteredAnalyses.length} analyses for topic "${params.topic}" using SOTA model...`,
+        "info",
+      );
+
+      // Call the SOTA model directly
+      const result = await runSynthesis(
+        {
+          topic: params.topic,
+          format,
+          analyses: filteredAnalyses,
+          indexContent,
+        },
+        ctx,
+      );
+
+      if (!result.success) {
+        const errorMsg = result.error || "Unknown synthesis error";
+        ctx.ui.notify(`⚠️ Synthesis failed: ${errorMsg}`, "warning");
+        return {
+          content: [
+            {
+              type: "text",
+              text: `## ❌ Synthesis Failed — Topic: "${params.topic}"` +
+                `\n\n**Model:** deepseek-v4-pro (SOTA)` +
+                `\n**Sources:** ${filteredAnalyses.length} analysis files` +
+                `\n**Error:** ${errorMsg}` +
+                `\n\nTry again or check your model configuration.`,
+            },
+          ],
+          details: {
+            topic: params.topic,
+            format,
+            sourceCount: filteredAnalyses.length,
+            totalAnalyses: analysisFiles.length,
+            success: false,
+            error: errorMsg,
+          },
+        };
       }
 
-      const instructions = [
-        `# Synthesize — Topic: "${params.topic}"`,
-        "",
+      // Write synthesized document to wisdom/{topic}.md
+      const wisdomPath = path.join(wisdomDir, `${params.topic}.md`);
+
+      const document = [
+        `# ${topicToTitle(params.topic)} — ${formatToTitle(format)}`,
+        ``,
+        `**Topic:** ${params.topic}`,
         `**Format:** ${format}`,
-        summaryParts.join(". "),
-        `**Output:** \`${path.join(wisdomDir, `${params.topic}.md`)}\``,
-        "",
-        "## Instructions",
-        "",
-        `Synthesize the per-session analyses below into a coherent **${format}** about **${params.topic}**. Use a SOTA model.`,
-        "",
-        "The synthesis should:",
-        "1. Identify patterns and recurring themes across sessions",
-        "2. Track evolution of decisions over time",
-        "3. Note contradictions or unresolved tensions",
-        "4. Highlight key decisions with session context",
-        "5. Provide actionable next steps",
-        "",
-        "## Session Timeline",
-        "",
-        indexContent.slice(0, 2000) || "(no index available)",
-        "",
-        "## Per-Session Analyses",
-        "",
-        ...filteredAnalyses.map(
-          (a, i) => `### ${i + 1}. ${a.file}\n\n${a.content}`,
-        ),
-      ].join("\n");
+        `**Generated:** ${new Date().toISOString()}`,
+        `**Model:** deepseek-v4-pro (SOTA)`,
+        `**Sources:** ${filteredAnalyses.length} analysis files from ${analysisFiles.length} total`,
+        notRelevant > 0 ? `**Excluded (not relevant):** ${notRelevant}` : null,
+        topicMismatch > 0 ? `**Excluded (topic mismatch):** ${topicMismatch}` : null,
+        globSkipped > 0 ? `**Excluded (glob):** ${globSkipped}` : null,
+        topicFilter && topicFilter.length > 0
+          ? `**Topic filter:** ${topicFilter.join(", ")}`
+          : null,
+        ``,
+        `---`,
+        ``,
+        result.content,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      fs.writeFileSync(wisdomPath, document, "utf-8");
+
+      ctx.ui.notify(
+        `✅ ${formatToTitle(format)} written to ${path.relative(cwd, wisdomPath)}`,
+        "info",
+      );
+
+      // Build result summary
+      const summaryParts: string[] = [
+        `✅ Synthesis complete!`,
+        `**Topic:** ${params.topic}`,
+        `**Format:** ${format}`,
+        `**Model:** deepseek-v4-pro (SOTA)`,
+        `**Sources:** ${filteredAnalyses.length} analysis files`,
+        `**Output:** \`${path.relative(cwd, wisdomPath)}\``,
+      ];
+      if (globSkipped > 0) summaryParts.push(`**Excluded by glob:** ${globSkipped}`);
+      if (notRelevant > 0) summaryParts.push(`**Excluded (not relevant):** ${notRelevant}`);
+      if (topicMismatch > 0) summaryParts.push(`**Excluded (topic mismatch):** ${topicMismatch}`);
+      if (topicFilter && topicFilter.length > 0) {
+        summaryParts.push(`**Filtered by topics:** ${topicFilter.join(", ")}`);
+      }
+
+      const wordCount = result.content.split(/\s+/).filter(Boolean).length;
+      summaryParts.push(`**Document size:** ~${wordCount} words`);
 
       return {
-        content: [{ type: "text", text: instructions }],
+        content: [
+          {
+            type: "text",
+            text: summaryParts.join("\n"),
+          },
+        ],
         details: {
           topic: params.topic,
           format,
@@ -645,11 +709,37 @@ export default function (pi: ExtensionAPI) {
           totalAnalyses: analysisFiles.length,
           notRelevant,
           topicMismatch,
-          wisdomPath: path.join(wisdomDir, `${params.topic}.md`),
+          globSkipped,
+          success: true,
+          wordCount,
+          wisdomPath: path.relative(cwd, wisdomPath),
         },
       };
     },
   });
+
+  // ─── Helpers for synthesize tool ──────────────────────────────────────────────
+
+  function topicToTitle(topic: string): string {
+    return topic
+      .replace(/[-_]/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .replace(/\b(And|Of|The|In|For)\b/g, (c) => c.toLowerCase())
+      .replace(/^./, (c) => c.toUpperCase());
+  }
+
+  function formatToTitle(format: string): string {
+    switch (format) {
+      case "blueprint":
+        return "Blueprint";
+      case "summary":
+        return "Executive Summary";
+      case "timeline":
+        return "Timeline";
+      default:
+        return format.charAt(0).toUpperCase() + format.slice(1);
+    }
+  }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
