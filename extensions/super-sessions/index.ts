@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { extractSessionFile, buildIndex, listSessions, type SessionMeta } from "./extraction";
 import { generateSessionHtml, generateIndexHtml } from "./html-generator";
+import { handleTagCommand } from "./tagging";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
@@ -101,7 +102,7 @@ async function runMechanicalExtraction(ctx: ExtensionCommandContext): Promise<{
 
   ctx.ui.notify(
     `✅ Generated ${extracted} session exports to ${INSIGHTS_DIR}/ (${failed} failed)`,
-    "success",
+    "info",
   );
 
   return { sessions, count: extracted };
@@ -154,6 +155,29 @@ export default function (pi: ExtensionAPI) {
     description: "Regenerate project session exports (sessions/, html/, index.md)",
     handler: async (_args, ctx) => {
       await runMechanicalExtraction(ctx);
+    },
+  });
+
+  // ─── Subcommand: /super_sessions tag ────────────────────────────────────────
+
+  pi.registerCommand("super_sessions tag", {
+    description:
+      "Tag untagged session .md files with YAML frontmatter (project_relevant, topics, summary). " +
+      "Uses cheap LLM (deepseek-v4-flash). Skips already-tagged files. " +
+      "Flags: --force to retag, --strip-noise to remove tangents from body.",
+    handler: async (args, ctx) => {
+      const force = args.includes("--force");
+      const stripNoise = args.includes("--strip-noise");
+      await handleTagCommand(args, ctx, { force, stripNoise });
+    },
+  });
+
+  pi.registerCommand("super_sessions retag", {
+    description:
+      "Alias for 'tag'. Tags only sessions missing frontmatter (same as 'tag' with no --force).",
+    handler: async (args, ctx) => {
+      const stripNoise = args.includes("--strip-noise");
+      await handleTagCommand(args, ctx, { force: false, stripNoise });
     },
   });
 
