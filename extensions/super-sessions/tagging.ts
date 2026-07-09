@@ -15,7 +15,7 @@ import { Type } from "typebox";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
-const INSIGHTS_DIR = "project_insights";
+const INSIGHTS_DIR = ".memory/project_insights";
 const SESSIONS_DIR = "sessions";
 const DEFAULT_MODEL = "deepseek-v4-flash";
 const DEFAULT_MODEL_PROVIDER = "deepseek";
