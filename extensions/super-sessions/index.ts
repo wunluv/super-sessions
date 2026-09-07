@@ -28,11 +28,12 @@ const WISDOM_DIR = "wisdom";
 // ─── Helpers ──────────────────────────────────────────────────────────────────────
 
 function getInsightsRoot(cwd: string): string {
-  // pi-agent-memory projects keep project memory (and insights) under <cwd>/.memory/.
-  // Pre-memory projects used a top-level <cwd>/project_insights/ dir. Prefer whichever
-  // exists; default to the .memory layout (current convention).
-  const memRoot = path.join(cwd, ".memory", INSIGHTS_DIR);
-  const legacyRoot = path.join(cwd, INSIGHTS_DIR);
+  // INSIGHTS_DIR (e.g. .memory/project_insights) is the current layout for
+  // pi-agent-memory projects. Pre-memory projects used a top-level
+  // <cwd>/project_insights/ dir. Prefer whichever exists; default to the
+  // .memory layout (current convention).
+  const memRoot = path.join(cwd, INSIGHTS_DIR);
+  const legacyRoot = path.join(cwd, "project_insights");
   if (fs.existsSync(memRoot)) return memRoot;
   if (fs.existsSync(legacyRoot)) return legacyRoot;
   return memRoot;
