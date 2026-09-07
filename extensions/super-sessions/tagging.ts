@@ -26,7 +26,14 @@ const PROMPTS_DIR = path.join(__dirname, "prompts");
 // ─── Helpers ──────────────────────────────────────────────────────────────────────
 
 function getInsightsRoot(cwd: string): string {
-  return path.join(cwd, INSIGHTS_DIR);
+  // pi-agent-memory projects keep project memory (and insights) under <cwd>/.memory/.
+  // Pre-memory projects used a top-level <cwd>/project_insights/ dir. Prefer whichever
+  // exists; default to the .memory layout (current convention).
+  const memRoot = path.join(cwd, ".memory", INSIGHTS_DIR);
+  const legacyRoot = path.join(cwd, INSIGHTS_DIR);
+  if (fs.existsSync(memRoot)) return memRoot;
+  if (fs.existsSync(legacyRoot)) return legacyRoot;
+  return memRoot;
 }
 
 function getSessionsDir(cwd: string): string {
@@ -233,7 +240,11 @@ async function callModelForTagging(
       messages: [
         { role: "user", content: prompt },
       ],
-      max_tokens: 1024,
+      // deepseek-v4-flash is a reasoning model: chain-of-thought counts against
+      // max_tokens, and a long reasoning run returns empty content (finish_reason
+      // "length") when the budget is exhausted. 4096 matches analysis.ts and gives
+      // generous headroom for reasoning + a short YAML answer.
+      max_tokens: 4096,
       temperature: 0.1,
     }),
     signal: ctx.signal,
@@ -311,16 +322,30 @@ export async function tagOneSession(
   const truncated = truncateSessionBody(sessionBody);
 
   const prompt = buildTaggingPrompt(truncated, projectContext);
-  const response = await retryOnce(
-    () => callModelForTagging(prompt, ctx),
-    `tagging ${path.basename(filePath)}`,
-  );
+
+  // Call the model, retrying both on thrown errors (retryOnce) and on empty
+  // responses. Empty responses happen when this reasoning model exhausts its
+  // token budget on chain-of-thought (finish_reason "length"); reasoning length
+  // is stochastic, so a fresh attempt usually succeeds.
+  let response: string | null = null;
+  for (let attempt = 1; attempt <= 3 && !response; attempt++) {
+    response = await retryOnce(
+      () => callModelForTagging(prompt, ctx),
+      `tagging ${path.basename(filePath)} (attempt ${attempt}/3)`,
+    );
+    if (!response && attempt < 3) {
+      console.warn(
+        `[super_sessions] Empty LLM response for ${path.basename(filePath)} (attempt ${attempt}/3), retrying in 2s...`,
+      );
+      await sleep(2000);
+    }
+  }
 
   if (!response) {
     return {
       file: path.basename(filePath),
       success: false,
-      error: "Empty response from LLM",
+      error: "Empty response from LLM after 3 attempts",
     };
   }
 
