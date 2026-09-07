@@ -9,6 +9,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { log } from "./log";
 
 // ─── Types ────────────────────────────────────────────────────────────────────────
 
@@ -140,8 +141,8 @@ function parseSessionHeader(filePath: string): { id: string; timestamp: string; 
  * Returns entries in order (skips the header line).
  *
  * Edge cases:
- * - Corrupt JSONL lines: logged with console.warn, skipped, processing continues
- * - Unreadable file: logged with console.error, returns empty array
+ * - Corrupt JSONL lines: logged via file logger (log.warn), skipped, processing continues
+ * - Unreadable file: logged via file logger (log.error), returns empty array
  * - Empty file (header only): returns empty array
  */
 function parseSessionEntries(filePath: string): SessionEntry[] {
@@ -162,12 +163,12 @@ function parseSessionEntries(filePath: string): SessionEntry[] {
     }
 
     if (corruptCount > 0) {
-      console.warn(`[super_sessions] ${corruptCount} corrupt JSONL line(s) in ${path.basename(filePath)} — skipped`);
+      log.warn(`[super_sessions] ${corruptCount} corrupt JSONL line(s) in ${path.basename(filePath)} — skipped`);
     }
 
     return entries;
   } catch (err) {
-    console.error(`[super_sessions] Could not read session file ${path.basename(filePath)}: ${err instanceof Error ? err.message : String(err)}`);
+    log.error(`[super_sessions] Could not read session file ${path.basename(filePath)}: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }
@@ -373,14 +374,14 @@ export function extractSessionFile(
   // Parse entries
   const allEntries = parseSessionEntries(sessionPath);
   if (allEntries.length === 0) {
-    console.warn(`[super_sessions] Empty session file: ${path.basename(sessionPath)} — skipping`);
+    log.warn(`[super_sessions] Empty session file: ${path.basename(sessionPath)} — skipping`);
     return null;
   }
 
   // Get active branch (walk from leaf to root)
   const branch = getActiveBranch(allEntries);
   if (branch.length === 0) {
-    console.warn(`[super_sessions] No active branch in ${path.basename(sessionPath)} — skipping`);
+    log.warn(`[super_sessions] No active branch in ${path.basename(sessionPath)} — skipping`);
     return null;
   }
 
@@ -400,7 +401,7 @@ export function extractSessionFile(
 
   // Skip sessions with no user or assistant messages (e.g. tool-only sessions)
   if (userMsgs === 0 && assistantMsgs === 0) {
-    console.warn(`[super_sessions] Session ${baseName} has no user or assistant messages — skipping`);
+    log.warn(`[super_sessions] Session ${baseName} has no user or assistant messages — skipping`);
     return null;
   }
 
@@ -421,7 +422,7 @@ export function extractSessionFile(
       `\n\n[... _full.md truncated at ${MARKDOWN_SIZE_LIMIT} characters — ${fullMd.length} total in source ...]`
     : fullMd;
   if (fullMd.length > MARKDOWN_SIZE_LIMIT) {
-    console.warn(`[super_sessions] ${baseName}_full.md truncated (${fullMd.length} chars > ${MARKDOWN_SIZE_LIMIT} limit)`);
+    log.warn(`[super_sessions] ${baseName}_full.md truncated (${fullMd.length} chars > ${MARKDOWN_SIZE_LIMIT} limit)`);
   }
   const fullPath = path.join(outputDir, `${baseName}_full.md`);
   const fullHeader = `# ${sessionName} (Full)\n\n**Session:** ${baseName}\n**Date:** ${dateStr}\n**Project:** ${rawInfo.cwd}\n**Messages:** ${userMsgs} user, ${assistantMsgs} assistant\n\n> Includes thinking blocks, tool calls, and tool results.\n\n---\n`;
@@ -486,7 +487,7 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
     }
 
     if (closingIndex < 0) {
-      console.warn(`[super_sessions] Unclosed YAML frontmatter in ${path.basename(filePath)} — treating as untagged`);
+      log.warn(`[super_sessions] Unclosed YAML frontmatter in ${path.basename(filePath)} — treating as untagged`);
       return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
     }
 
@@ -494,7 +495,7 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
     const fmLines = lines.slice(1, closingIndex);
 
     if (fmLines.length === 0) {
-      console.warn(`[super_sessions] Empty YAML frontmatter block in ${path.basename(filePath)} — treating as untagged`);
+      log.warn(`[super_sessions] Empty YAML frontmatter block in ${path.basename(filePath)} — treating as untagged`);
       return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
     }
 
@@ -504,7 +505,7 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
       if (line) {
         const match = line.match(/^project_relevant:\s*(true|false)/);
         if (!match) {
-          console.warn(`[super_sessions] Could not parse project_relevant value in ${path.basename(filePath)}: ${line.trim()}`);
+          log.warn(`[super_sessions] Could not parse project_relevant value in ${path.basename(filePath)}: ${line.trim()}`);
           return true;
         }
         return match[1] === "true";
@@ -544,7 +545,7 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
           .trim();
         // Reject if the value is clearly malformed (e.g. another key)
         if (/^\w+:/.test(val)) {
-          console.warn(`[super_sessions] Malformed summary value in ${path.basename(filePath)}: ${line.trim()}`);
+          log.warn(`[super_sessions] Malformed summary value in ${path.basename(filePath)}: ${line.trim()}`);
           return "";
         }
         return val;
@@ -569,7 +570,7 @@ export function parseSessionFrontmatter(filePath: string): SessionFrontmatter {
       noise_stripped: noiseStripped,
     };
   } catch (err) {
-    console.warn(`[super_sessions] Could not read ${path.basename(filePath)} for frontmatter parsing: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn(`[super_sessions] Could not read ${path.basename(filePath)} for frontmatter parsing: ${err instanceof Error ? err.message : String(err)}`);
     return { project_relevant: true, topics: [], summary: "", noise_stripped: false };
   }
 }

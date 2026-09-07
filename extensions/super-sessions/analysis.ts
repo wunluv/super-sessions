@@ -9,6 +9,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { log } from "./log";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
@@ -33,7 +34,7 @@ async function retryOnce<T>(
   try {
     return await fn();
   } catch (firstErr) {
-    console.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
+    log.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
     await sleep(2000);
     return await fn();
   }

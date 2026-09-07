@@ -10,6 +10,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { log } from "./log";
 import type { ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -61,7 +62,7 @@ async function retryOnce<T>(
   try {
     return await fn();
   } catch (firstErr) {
-    console.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
+    log.warn(`[super_sessions] First attempt failed for ${label}: ${firstErr instanceof Error ? firstErr.message : String(firstErr)}. Retrying in 2s...`);
     await sleep(2000);
     return await fn();
   }
@@ -312,7 +313,7 @@ export async function tagOneSession(
 
   // Skip empty sessions (no body content to tag)
   if (!sessionBody.trim()) {
-    console.warn(`[super_sessions] Empty session body in ${path.basename(filePath)} — skipping`);
+    log.warn(`[super_sessions] Empty session body in ${path.basename(filePath)} — skipping`);
     return {
       file: path.basename(filePath),
       success: false,
@@ -335,7 +336,7 @@ export async function tagOneSession(
       `tagging ${path.basename(filePath)} (attempt ${attempt}/3)`,
     );
     if (!response && attempt < 3) {
-      console.warn(
+      log.warn(
         `[super_sessions] Empty LLM response for ${path.basename(filePath)} (attempt ${attempt}/3), retrying in 2s...`,
       );
       await sleep(2000);
@@ -354,7 +355,7 @@ export async function tagOneSession(
 
   // Retry with stricter prompt if YAML parsing failed
   if (!frontmatterLines) {
-    console.warn(
+    log.warn(
       `[super_sessions] Invalid YAML from LLM for ${path.basename(filePath)}, retrying with stricter prompt...`,
     );
     const strictPrompt =
@@ -413,7 +414,7 @@ export async function tagAllUntagged(
     .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md"))
     .sort();
 
-  console.log(`[super_sessions] tagAllUntagged: ${sessionFiles.length} session files found, force=${options?.force ?? false}`);
+  log.info(`[super_sessions] tagAllUntagged: ${sessionFiles.length} session files found, force=${options?.force ?? false}`);
 
   const total = sessionFiles.length;
   const tagged: TagResult[] = [];
@@ -428,7 +429,7 @@ export async function tagAllUntagged(
     // Skip if already has frontmatter (unless --force)
     if (!options?.force && hasFrontmatter(filePath)) {
       skipped.push(file);
-      console.warn(`[super_sessions] Skipping ${file} (already tagged)`);
+      log.warn(`[super_sessions] Skipping ${file} (already tagged)`);
       continue;
     }
 
@@ -446,7 +447,7 @@ export async function tagAllUntagged(
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[super_sessions] Tag error for ${file}: ${msg}`);
+      log.error(`[super_sessions] Tag error for ${file}: ${msg}`);
       errors.push({
         file,
         success: false,
@@ -469,9 +470,9 @@ export async function handleTagCommand(
 ): Promise<void> {
   // Pre-check: verify the model is available
   const model = ctx.modelRegistry.find(DEFAULT_MODEL_PROVIDER, DEFAULT_MODEL);
-  console.log(`[super_sessions] Model lookup: provider=${DEFAULT_MODEL_PROVIDER}, model=${DEFAULT_MODEL}, found=${!!model}`);
+  log.info(`[super_sessions] Model lookup: provider=${DEFAULT_MODEL_PROVIDER}, model=${DEFAULT_MODEL}, found=${!!model}`);
   if (!model) {
-    console.error(`[super_sessions] Model not found! Available providers may not include "${DEFAULT_MODEL_PROVIDER}"`);
+    log.error(`[super_sessions] Model not found! Available providers may not include "${DEFAULT_MODEL_PROVIDER}"`);
     ctx.ui.notify(
       `❌ Model "${DEFAULT_MODEL_PROVIDER}/${DEFAULT_MODEL}" not found. Add it to ~/.pi/agent/models.json under the "${DEFAULT_MODEL_PROVIDER}" provider.`,
       "error",
@@ -510,7 +511,7 @@ export async function handleTagCommand(
 
   const message = parts.join(". ") || "No untagged sessions found.";
   const statusMsg = errorCount > 0
-    ? `⚠️ ${message} — ${errorCount} session(s) failed (check console for details)`
+    ? `⚠️ ${message} — ${errorCount} session(s) failed (see ~/.pi/agent/super-sessions.log)`
     : taggedCount > 0
       ? `✅ ${message}`
       : `ℹ️ ${message}`;
@@ -518,6 +519,6 @@ export async function handleTagCommand(
 
   // Log errors
   for (const err of summary.errors) {
-    console.error(`[super_sessions] Tag error for ${err.file}: ${err.error}`);
+    log.error(`[super_sessions] Tag error for ${err.file}: ${err.error}`);
   }
 }

@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { log } from "./log";
 import { extractSessionFile, buildIndex, listSessions, parseSessionFrontmatter, type SessionMeta, type SessionFrontmatter } from "./extraction";
 import { generateSessionHtml, generateIndexHtml } from "./html-generator";
 import { handleTagCommand } from "./tagging";
@@ -96,11 +97,11 @@ async function runMechanicalExtraction(ctx: ExtensionCommandContext): Promise<{
         extracted++;
       } else {
         failed++;
-        console.warn(`[super_sessions] Skipped ${fileName} (no extractable content)`);
+        log.warn(`[super_sessions] Skipped ${fileName} (no extractable content)`);
       }
     } catch (err) {
       failed++;
-      console.error(`[super_sessions] Extraction error for ${fileName}: ${err instanceof Error ? err.message : String(err)}`);
+      log.error(`[super_sessions] Extraction error for ${fileName}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
