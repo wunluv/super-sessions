@@ -68,5 +68,5 @@ At the end of every session:
 - **Repo:** https://github.com/wunluv/super-sessions
 - **Spec:** `spec.md` in repo root — the full technical design
 - **Extension source:** `extensions/super-sessions/`
-- **Pi auto-discovery:** `~/.pi/agent/extensions/super-sessions/` (copy from source for local dev, use `./dev.sh`)
+- **Pi auto-discovery:** `~/.pi/agent/extensions/super-sessions/` is a **symlink** to `extensions/super-sessions/` here, so pi loads this repo directly. Repair it with `./dev.sh` (`--check` to report only). Never develop in the live path; it is the same files, but a copy diverged twice before this and cost a day of work.
 - **Human:** San Naidoo, CEO Khanyi Corporation. Solo operator. Caps deep work at 30hrs/week. Designs/architects, agent executes.

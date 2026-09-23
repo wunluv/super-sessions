@@ -336,6 +336,36 @@ The output should be a standalone document suitable for human review and agent c
 - Default: the model active in the current pi session (user's chosen model)
 - Override: `model` parameter for deliberate control
 
+### Command: `/super-sessions-friction`
+
+Export → numeric pass → tag untagged sessions → analyse the `friction` topic, in one command.
+Flags: `--sessions <glob>`, `--numeric-only`, `--no-tag`.
+
+### Script: `scripts/extract-friction.py`
+
+The numeric pass, free and LLM-free. Reads session JSONL and writes five tables into
+`<project>/.memory/project_insights/audit/`: `INDEX.tsv` (per-session cost, errors, handed
+paths), `REPEAT-SIGNATURES.tsv` (procedures rebuilt across sessions), `RECURRING-ARTIFACTS.tsv`,
+`HANDED-PATH-WASTE.tsv` (a search for a path the human supplied, before any read), plus
+per-session `.tsv` and `.users.md`. Works per turn; matches filenames by token so a glob
+search for the handed file still counts.
+
+### Topic: `friction`
+
+`prompts/analyze-friction.md` extracts F1-F8: supplied-context ignored, procedure rebuilt,
+fact re-derived, rule not honoured, output-shape drift, friction by question, tool misfit,
+human-side friction. It requires a quote per observation and permits the answer "No friction
+observed." Where the conversation layer and the numeric layer disagree, the numbers win.
+
+### Workflow prompts: `pi-prompts/`
+
+`session-friction-audit` (findings, routing, budget, staged drafts), `session-friction-resolve`
+(apply under a per-finding contract; `--dry-run` rehearses), `session-friction-check` (re-measure
+against `BASELINE.tsv`, keep/rewrite/delete). Loaded through the `prompts` setting.
+
+Full design, decisions log and operator manual: `extensions/super-sessions/SPEC-friction.md`
+and `GUIDE-friction.md`.
+
 ## Model Tiering Strategy
 
 | Tier | Model | Use | Token Cost | Invocation |
