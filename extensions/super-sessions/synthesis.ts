@@ -17,7 +17,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 /** SOTA model for synthesis — explicitly named for clarity vs analysis.ts which uses deepseek-v4-flash */
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_MODEL_PROVIDER = "deepseek";
-const DEFAULT_MAX_TOKENS = 8192;
+/** A blueprint over many analyses needs room; deepseek-v4-pro also spends
+ *  output tokens on reasoning before it writes. 8192 returned empty content. */
+const DEFAULT_MAX_TOKENS = 32768;
+const MAX_TOKENS_CEILING = 32768;
 
 // ─── Retry Helper ─────────────────────────────────────────────────────────────────
 
@@ -213,6 +216,12 @@ export async function callSynthesisModel(
   const baseUrl = model.baseUrl || `https://api.${DEFAULT_MODEL_PROVIDER}.com`;
   const modelId = model.id;
 
+  const modelMaxTokens = (model as unknown as { maxTokens?: number }).maxTokens;
+  const maxTokens = Math.max(
+    DEFAULT_MAX_TOKENS,
+    Math.min(modelMaxTokens ?? DEFAULT_MAX_TOKENS, MAX_TOKENS_CEILING),
+  );
+
   const url = `${baseUrl.replace(/\/+$/, "")}/v1/chat/completions`;
 
   const response = await fetch(url, {
@@ -224,7 +233,7 @@ export async function callSynthesisModel(
     body: JSON.stringify({
       model: modelId,
       messages: [{ role: "user", content: prompt }],
-      max_tokens: DEFAULT_MAX_TOKENS,
+      max_tokens: maxTokens,
       temperature: 0.2,
     }),
     signal: ctx.signal,
@@ -238,14 +247,23 @@ export async function callSynthesisModel(
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{
+      message?: { content?: string; reasoning_content?: string };
+      finish_reason?: string;
+    }>;
   };
 
-  if (!data.choices?.[0]?.message?.content) {
-    return null;
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content?.trim();
+  if (!content) {
+    throw new Error(
+      `Empty content from synthesis LLM (finish_reason: ${choice?.finish_reason ?? "none"}, ` +
+        `max_tokens: ${maxTokens}, prompt chars: ${prompt.length}). ` +
+        `Reasoning likely consumed the output budget.`,
+    );
   }
 
-  return data.choices[0].message.content.trim();
+  return content;
 }
 
 // ─── Synthesis Entry Point ────────────────────────────────────────────────────────

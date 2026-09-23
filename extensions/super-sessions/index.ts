@@ -11,11 +11,13 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import { log } from "./log";
 import { extractSessionFile, buildIndex, listSessions, parseSessionFrontmatter, type SessionMeta, type SessionFrontmatter } from "./extraction";
 import { generateSessionHtml, generateIndexHtml } from "./html-generator";
 import { handleTagCommand } from "./tagging";
-import { analyzeOneSession } from "./analysis";
+import { analyzeTopic } from "./analysis";
+import { getInsightsRoot, getSessionsDir, getHtmlDir, getAnalysesDir, getWisdomDir, getAuditDir } from "./paths";
 import { runSynthesis } from "./synthesis";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
@@ -27,34 +29,6 @@ const ANALYSES_DIR = "analyses";
 const WISDOM_DIR = "wisdom";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────────
-
-function getInsightsRoot(cwd: string): string {
-  // INSIGHTS_DIR (e.g. .memory/project_insights) is the current layout for
-  // pi-agent-memory projects. Pre-memory projects used a top-level
-  // <cwd>/project_insights/ dir. Prefer whichever exists; default to the
-  // .memory layout (current convention).
-  const memRoot = path.join(cwd, INSIGHTS_DIR);
-  const legacyRoot = path.join(cwd, "project_insights");
-  if (fs.existsSync(memRoot)) return memRoot;
-  if (fs.existsSync(legacyRoot)) return legacyRoot;
-  return memRoot;
-}
-
-function getSessionsDir(cwd: string): string {
-  return path.join(getInsightsRoot(cwd), SESSIONS_DIR);
-}
-
-function getHtmlDir(cwd: string): string {
-  return path.join(getInsightsRoot(cwd), HTML_DIR);
-}
-
-function getAnalysesDir(cwd: string): string {
-  return path.join(getInsightsRoot(cwd), ANALYSES_DIR);
-}
-
-function getWisdomDir(cwd: string): string {
-  return path.join(getInsightsRoot(cwd), WISDOM_DIR);
-}
 
 // ─── Mechanical Extraction Command ────────────────────────────────────────────────
 
@@ -247,229 +221,15 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const cwd = ctx.cwd;
-      const sessionsDir = getSessionsDir(cwd);
-      const analysesDir = path.join(getAnalysesDir(cwd), params.topic);
-      const glob = params.sessionGlob || "all";
-      const topicFilter = params.topics;
-
-      if (!fs.existsSync(sessionsDir)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No sessions directory found at ${sessionsDir}. Run /super_sessions first to export sessions.`,
-            },
-          ],
-          details: {},
-        };
-      }
-
-      const sessionFiles = fs
-        .readdirSync(sessionsDir)
-        .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md"))
-        .sort();
-
-      if (sessionFiles.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No session .md files found in ${sessionsDir}. Run /super_sessions first.`,
-            },
-          ],
-          details: {},
-        };
-      }
-
-      // Match sessions by glob
-      const matched = sessionFiles.filter((f) => {
-        if (glob === "all") return true;
-        const globRe = new RegExp("^" + glob.replace(/\*/g, ".*") + ".*\\.md$");
-        return globRe.test(f);
+      const res = await analyzeTopic(ctx, {
+        topic: params.topic,
+        sessionGlob: params.sessionGlob,
+        topics: params.topics,
+        focusPrompt: params.focusPrompt,
       });
-
-      if (matched.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No sessions matched glob "${glob}". Available: ${sessionFiles.join(", ")}`,
-            },
-          ],
-          details: {},
-        };
-      }
-
-      // Filter by frontmatter
-      const relevant: string[] = [];
-      const notRelevant: string[] = [];
-      const topicMismatch: string[] = [];
-
-      for (const file of matched) {
-        const sessionPath = path.join(sessionsDir, file);
-        const fm = parseSessionFrontmatter(sessionPath);
-
-        if (!fm.project_relevant) {
-          notRelevant.push(file);
-          continue;
-        }
-
-        if (topicFilter && topicFilter.length > 0) {
-          const hasTopic = topicFilter.some((t) =>
-            fm.topics.some((st) => st.toLowerCase() === t.toLowerCase()),
-          );
-          if (!hasTopic) {
-            topicMismatch.push(file);
-            continue;
-          }
-        }
-
-        relevant.push(file);
-      }
-
-      if (relevant.length === 0) {
-        const parts: string[] = ["No sessions available for analysis"];
-        if (notRelevant.length > 0) {
-          parts.push(`${notRelevant.length} filtered out (not project relevant)`);
-        }
-        if (topicMismatch.length > 0) {
-          parts.push(`${topicMismatch.length} filtered out (topic mismatch)`);
-        }
-        return {
-          content: [{ type: "text", text: parts.join(". ") + "." }],
-          details: { topic: params.topic, matched: matched.length, notRelevant: notRelevant.length, topicMismatch: topicMismatch.length },
-        };
-      }
-
-      fs.mkdirSync(analysesDir, { recursive: true });
-
-      // Check which already have analyses (idempotent)
-      const toAnalyze: string[] = [];
-      let alreadyAnalyzed = 0;
-
-      for (const file of relevant) {
-        const analysisPath = path.join(analysesDir, file);
-        if (fs.existsSync(analysisPath)) {
-          alreadyAnalyzed++;
-        } else {
-          toAnalyze.push(file);
-        }
-      }
-
-      if (toAnalyze.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: [
-                `All ${relevant.length} relevant sessions already analyzed for topic "${params.topic}".`,
-                alreadyAnalyzed > 0 ? `${alreadyAnalyzed} already analyzed.` : "",
-                notRelevant.length > 0 ? `${notRelevant.length} skipped (not project relevant).` : "",
-                topicMismatch.length > 0 ? `${topicMismatch.length} skipped (topic mismatch).` : "",
-              ].filter(Boolean).join(" "),
-            },
-          ],
-          details: {
-            topic: params.topic,
-            total: relevant.length,
-            alreadyAnalyzed,
-            notRelevant: notRelevant.length,
-            topicMismatch: topicMismatch.length,
-          },
-        };
-      }
-
-      // Analyze each session via cheap LLM
-      const analyzed: string[] = [];
-      const errors: string[] = [];
-
-      for (let i = 0; i < toAnalyze.length; i++) {
-        const file = toAnalyze[i];
-        const sessionPath = path.join(sessionsDir, file);
-        const analysisDest = path.join(analysesDir, file);
-
-        // Report progress
-        ctx.ui.notify(
-          `Analyzing ${i + 1}/${toAnalyze.length}: ${file} for topic "${params.topic}"...`,
-          "info",
-        );
-
-        const result = await analyzeOneSession(
-          sessionPath,
-          analysisDest,
-          params.topic,
-          ctx,
-          params.focusPrompt,
-        );
-
-        if (result.success) {
-          analyzed.push(file);
-        } else {
-          errors.push(`${file}: ${result.error}`);
-          ctx.ui.notify(`⚠️ Analysis failed for ${file}: ${result.error}`, "warning");
-        }
-      }
-
-      // Build summary
-      const summaryParts: string[] = [];
-
-      if (analyzed.length > 0) {
-        summaryParts.push(`Analyzed ${analyzed.length} session${analyzed.length !== 1 ? "s" : ""} for topic "${params.topic}"`);
-      }
-      if (alreadyAnalyzed > 0) {
-        summaryParts.push(`${alreadyAnalyzed} skipped (already analyzed)`);
-      }
-      if (notRelevant.length > 0) {
-        summaryParts.push(`${notRelevant.length} skipped (not project relevant)`);
-      }
-      if (topicMismatch.length > 0) {
-        summaryParts.push(`${topicMismatch.length} skipped (topic mismatch)`);
-      }
-      if (errors.length > 0) {
-        summaryParts.push(`${errors.length} error${errors.length !== 1 ? "s" : ""}`);
-      }
-      if (topicFilter && topicFilter.length > 0) {
-        summaryParts.push(`Filtered by topics: ${topicFilter.join(", ")}`);
-      }
-
-      const summary = summaryParts.join(". ") + ".";
-
       return {
-        content: [
-          {
-            type: "text",
-            text: [
-              `## ✅ Analysis Complete — Topic: "${params.topic}"`,
-              "",
-              summary,
-              "",
-              analyzed.length > 0 ? `**Output:** ${analysesDir}` : "",
-              errors.length > 0
-                ? [
-                    "",
-                    "### Errors",
-                    "",
-                    ...errors.map((e) => `- ${e}`),
-                    "",
-                    "Error notes have been written to the analysis files.",
-                  ].join("\n")
-                : "",
-              params.focusPrompt ? `**Focus prompt used:** ${params.focusPrompt}` : "",
-            ]
-              .filter(Boolean)
-              .join("\n"),
-          },
-        ],
-        details: {
-          topic: params.topic,
-          analyzed: analyzed.length,
-          alreadyAnalyzed,
-          notRelevant: notRelevant.length,
-          topicMismatch: topicMismatch.length,
-          errors: errors.length,
-          analysesDir,
-        },
+        content: [{ type: "text", text: res.summary }],
+        details: res.details,
       };
     },
   });
@@ -755,6 +515,73 @@ export default function (pi: ExtensionAPI) {
         return format.charAt(0).toUpperCase() + format.slice(1);
     }
   }
+
+  // ─── Command: /super-sessions-friction ─────────────────────────────────────
+  // One shot for the friction audit: export sessions, run the numeric pass
+  // (free), then analyze the "friction" topic (cheap model, idempotent).
+
+  pi.registerCommand("super-sessions-friction", {
+    description:
+      "Friction audit pass: export sessions, run the numeric extractor into " +
+      ".memory/project_insights/audit/, then analyze sessions for the 'friction' topic. " +
+      "Flags: --sessions <glob> to limit the analysis, --numeric-only to skip the LLM pass, " +
+      "--no-tag to skip tagging untagged sessions first.",
+    handler: async (args, ctx) => {
+      const numericOnly = args.includes("--numeric-only");
+      const noTag = args.includes("--no-tag");
+      const globMatch = args.match(/--sessions\s+(\S+)/);
+      const glob = globMatch ? globMatch[1] : "all";
+
+      await runMechanicalExtraction(ctx);
+
+      const sessions = listSessions(ctx.cwd);
+      if (sessions.length === 0) {
+        ctx.ui.notify("No session files found for this project.", "warning");
+        return;
+      }
+
+      const sessionDir = path.dirname(sessions[0].path);
+      const auditDir = getAuditDir(ctx.cwd);
+      const script = path.join(__dirname, "scripts", "extract-friction.py");
+
+      try {
+        const out = execFileSync("python3", [script, sessionDir, auditDir], {
+          encoding: "utf-8",
+          timeout: 180_000,
+        });
+        ctx.ui.notify(`Numeric pass → ${auditDir}`, "info");
+        log.info(`[super_sessions] friction numeric pass: ${out.trim().split("\n").join(" | ")}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(`[super_sessions] friction numeric pass failed: ${msg}`);
+        ctx.ui.notify(`Numeric pass failed: ${msg}`, "error");
+        return;
+      }
+
+      if (numericOnly) {
+        ctx.ui.notify("Numeric pass done (--numeric-only). Read the tables in " + auditDir, "info");
+        return;
+      }
+
+      // Untagged sessions are filtered out of analysis, so tag them first.
+      if (!noTag) {
+        const sessionsDir = getSessionsDir(ctx.cwd);
+        const untagged = fs
+          .readdirSync(sessionsDir)
+          .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md"))
+          .filter((f) => !fs.readFileSync(path.join(sessionsDir, f), "utf-8").trimStart().startsWith("---"));
+        if (untagged.length > 0) {
+          ctx.ui.notify(`Tagging ${untagged.length} untagged session(s) first...`, "info");
+          await handleTagCommand("", ctx, { force: false, stripNoise: false });
+        }
+      }
+
+      const res = await analyzeTopic(ctx, { topic: "friction", sessionGlob: glob });
+      log.info(`[super_sessions] friction analysis: ${JSON.stringify(res.details)}`);
+      ctx.ui.notify(res.summary.split("\n")[2] || res.summary, "info");
+      ctx.ui.notify(`Friction analyses: ${path.join(getAnalysesDir(ctx.cwd), "friction")}`, "info");
+    },
+  });
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 

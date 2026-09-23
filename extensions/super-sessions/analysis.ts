@@ -10,13 +10,18 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { log } from "./log";
+import { getAnalysesDir, getSessionsDir } from "./paths";
+import { parseSessionFrontmatter } from "./extraction";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ─── Constants ────────────────────────────────────────────────────────────────────
 
 const DEFAULT_MODEL = "deepseek-v4-flash";
 const DEFAULT_MODEL_PROVIDER = "deepseek";
-const DEFAULT_MAX_TOKENS = 4096;
+/** Reasoning models spend output tokens on thinking first; a small budget
+ *  returns an empty content field. 16k covers thinking plus the analysis. */
+const DEFAULT_MAX_TOKENS = 16000;
+const MAX_TOKENS_CEILING = 32000;
 
 /** Directory where analysis prompts live */
 const PROMPTS_DIR = path.join(__dirname, "prompts");
@@ -49,6 +54,7 @@ async function retryOnce<T>(
  */
 function selectPromptTemplate(topic: string): string {
   const lower = topic.toLowerCase();
+  if (lower.includes("friction")) return "analyze-friction.md";
   if (lower.includes("engineering")) return "analyze-engineering.md";
   if (lower.includes("meaning")) return "analyze-meaning.md";
   if (lower.includes("ideas")) return "analyze-ideas.md";
@@ -231,6 +237,12 @@ export async function callAnalyzeModel(
   const baseUrl = model.baseUrl || `https://api.${DEFAULT_MODEL_PROVIDER}.com`;
   const modelId = model.id;
 
+  const modelMaxTokens = (model as unknown as { maxTokens?: number }).maxTokens;
+  const maxTokens = Math.max(
+    DEFAULT_MAX_TOKENS,
+    Math.min(modelMaxTokens ?? DEFAULT_MAX_TOKENS, MAX_TOKENS_CEILING),
+  );
+
   const url = `${baseUrl.replace(/\/+$/, "")}/v1/chat/completions`;
 
   const response = await fetch(url, {
@@ -242,7 +254,7 @@ export async function callAnalyzeModel(
     body: JSON.stringify({
       model: modelId,
       messages: [{ role: "user", content: prompt }],
-      max_tokens: DEFAULT_MAX_TOKENS,
+      max_tokens: maxTokens,
       temperature: 0.1,
     }),
     signal: ctx.signal,
@@ -256,14 +268,23 @@ export async function callAnalyzeModel(
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: Array<{
+      message?: { content?: string; reasoning_content?: string };
+      finish_reason?: string;
+    }>;
   };
 
-  if (!data.choices?.[0]?.message?.content) {
-    return null;
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content?.trim();
+  if (!content) {
+    throw new Error(
+      `Empty content from LLM (finish_reason: ${choice?.finish_reason ?? "none"}, ` +
+        `max_tokens: ${maxTokens}, prompt chars: ${prompt.length}). ` +
+        `Reasoning likely consumed the output budget.`,
+    );
   }
 
-  return data.choices[0].message.content.trim();
+  return content;
 }
 
 // ─── Truncation ───────────────────────────────────────────────────────────────────
@@ -395,5 +416,198 @@ export async function analyzeOneSession(
   return {
     file: fileName,
     success: true,
+  };
+}
+
+// ─── Topic Analysis Over Sessions ─────────────────────────────────────────────────
+
+export interface AnalyzeTopicOptions {
+  topic: string;
+  /** Glob matching session file names, e.g. "2026-06-*". Defaults to "all". */
+  sessionGlob?: string;
+  /** Only sessions whose frontmatter topics overlap this list. */
+  topics?: string[];
+  /** Extra extraction guidance appended to the prompt template. */
+  focusPrompt?: string;
+}
+
+export interface AnalyzeTopicSummary {
+  /** Markdown summary, identical for the tool and the command surface. */
+  summary: string;
+  details: Record<string, unknown>;
+}
+
+/**
+ * Analyze every project-relevant session for a topic, skipping sessions that
+ * already have an analysis file. Shared by the super_sessions_analyze tool and
+ * the /super-sessions-friction command.
+ */
+export async function analyzeTopic(
+  ctx: ExtensionContext,
+  opts: AnalyzeTopicOptions,
+): Promise<AnalyzeTopicSummary> {
+  const cwd = ctx.cwd;
+  const sessionsDir = getSessionsDir(cwd);
+  const analysesDir = path.join(getAnalysesDir(cwd), opts.topic);
+  const glob = opts.sessionGlob || "all";
+  const topicFilter = opts.topics;
+
+  if (!fs.existsSync(sessionsDir)) {
+    return {
+      summary: `No sessions directory found at ${sessionsDir}. Run /super_sessions first to export sessions.`,
+      details: { topic: opts.topic, error: "no sessions directory" },
+    };
+  }
+
+  const sessionFiles = fs
+    .readdirSync(sessionsDir)
+    .filter((f) => f.endsWith(".md") && !f.endsWith("_full.md"))
+    .sort();
+
+  if (sessionFiles.length === 0) {
+    return {
+      summary: `No session .md files found in ${sessionsDir}. Run /super_sessions first.`,
+      details: { topic: opts.topic, error: "no session files" },
+    };
+  }
+
+  const matched = sessionFiles.filter((f) => {
+    if (glob === "all") return true;
+    const globRe = new RegExp("^" + glob.replace(/\*/g, ".*") + ".*\\.md$");
+    return globRe.test(f);
+  });
+
+  if (matched.length === 0) {
+    return {
+      summary: `No sessions matched glob "${glob}". Available: ${sessionFiles.join(", ")}`,
+      details: { topic: opts.topic, error: "no glob match" },
+    };
+  }
+
+  const relevant: string[] = [];
+  const notRelevant: string[] = [];
+  const topicMismatch: string[] = [];
+
+  for (const file of matched) {
+    const fm = parseSessionFrontmatter(path.join(sessionsDir, file));
+    if (!fm.project_relevant) {
+      notRelevant.push(file);
+      continue;
+    }
+    if (topicFilter && topicFilter.length > 0) {
+      const hasTopic = topicFilter.some((t) =>
+        fm.topics.some((st) => st.toLowerCase() === t.toLowerCase()),
+      );
+      if (!hasTopic) {
+        topicMismatch.push(file);
+        continue;
+      }
+    }
+    relevant.push(file);
+  }
+
+  if (relevant.length === 0) {
+    const parts: string[] = ["No sessions available for analysis"];
+    if (notRelevant.length > 0) parts.push(`${notRelevant.length} filtered out (not project relevant)`);
+    if (topicMismatch.length > 0) parts.push(`${topicMismatch.length} filtered out (topic mismatch)`);
+    return {
+      summary: parts.join(". ") + ".",
+      details: {
+        topic: opts.topic,
+        matched: matched.length,
+        notRelevant: notRelevant.length,
+        topicMismatch: topicMismatch.length,
+      },
+    };
+  }
+
+  fs.mkdirSync(analysesDir, { recursive: true });
+
+  const toAnalyze: string[] = [];
+  let alreadyAnalyzed = 0;
+  for (const file of relevant) {
+    if (fs.existsSync(path.join(analysesDir, file))) alreadyAnalyzed++;
+    else toAnalyze.push(file);
+  }
+
+  if (toAnalyze.length === 0) {
+    const parts = [
+      `All ${relevant.length} relevant sessions already analyzed for topic "${opts.topic}".`,
+      alreadyAnalyzed > 0 ? `${alreadyAnalyzed} already analyzed.` : "",
+      notRelevant.length > 0 ? `${notRelevant.length} skipped (not project relevant).` : "",
+      topicMismatch.length > 0 ? `${topicMismatch.length} skipped (topic mismatch).` : "",
+    ].filter(Boolean);
+    return {
+      summary: parts.join(" "),
+      details: {
+        topic: opts.topic,
+        total: relevant.length,
+        alreadyAnalyzed,
+        notRelevant: notRelevant.length,
+        topicMismatch: topicMismatch.length,
+        analysesDir,
+      },
+    };
+  }
+
+  const analyzed: string[] = [];
+  const errors: string[] = [];
+
+  for (let i = 0; i < toAnalyze.length; i++) {
+    const file = toAnalyze[i];
+    ctx.ui.notify(
+      `Analyzing ${i + 1}/${toAnalyze.length}: ${file} for topic "${opts.topic}"...`,
+      "info",
+    );
+    const result = await analyzeOneSession(
+      path.join(sessionsDir, file),
+      path.join(analysesDir, file),
+      opts.topic,
+      ctx,
+      opts.focusPrompt,
+    );
+    if (result.success) analyzed.push(file);
+    else {
+      errors.push(`${file}: ${result.error}`);
+      log.error(`[super_sessions] analysis failed for ${opts.topic} / ${file}: ${result.error}`);
+      ctx.ui.notify(`⚠️ Analysis failed for ${file}: ${result.error}`, "warning");
+    }
+  }
+
+  const summaryParts: string[] = [];
+  if (analyzed.length > 0) {
+    summaryParts.push(`Analyzed ${analyzed.length} session${analyzed.length !== 1 ? "s" : ""} for topic "${opts.topic}"`);
+  }
+  if (alreadyAnalyzed > 0) summaryParts.push(`${alreadyAnalyzed} skipped (already analyzed)`);
+  if (notRelevant.length > 0) summaryParts.push(`${notRelevant.length} skipped (not project relevant)`);
+  if (topicMismatch.length > 0) summaryParts.push(`${topicMismatch.length} skipped (topic mismatch)`);
+  if (errors.length > 0) summaryParts.push(`${errors.length} error${errors.length !== 1 ? "s" : ""}`);
+  if (topicFilter && topicFilter.length > 0) summaryParts.push(`Filtered by topics: ${topicFilter.join(", ")}`);
+
+  const summary = [
+    `## ✅ Analysis Complete — Topic: "${opts.topic}"`,
+    "",
+    summaryParts.join(". ") + ".",
+    "",
+    analyzed.length > 0 ? `**Output:** ${analysesDir}` : "",
+    errors.length > 0
+      ? ["", "### Errors", "", ...errors.map((e) => `- ${e}`), "", "Error notes have been written to the analysis files."].join("\n")
+      : "",
+    opts.focusPrompt ? `**Focus prompt used:** ${opts.focusPrompt}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    summary,
+    details: {
+      topic: opts.topic,
+      analyzed: analyzed.length,
+      alreadyAnalyzed,
+      notRelevant: notRelevant.length,
+      topicMismatch: topicMismatch.length,
+      errors: errors.length,
+      analysesDir,
+    },
   };
 }
